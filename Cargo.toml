@@ -1,0 +1,29 @@
+[package]
+name = "modernscreenshot"
+version = "1.0.0"
+edition = "2021"
+authors = ["R1tain"]
+
+[dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_GdiPlus",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+] }
+
+[profile.release]
+opt-level = "z"         # 最小体积优化
+lto = true              # 链接时优化
+codegen-units = 1       # 单个代码生成单元
+strip = true            # 移除符号
+panic = "abort"         # 减小 panic 处理体积
+
+[profile.dev]
+opt-level = 0
