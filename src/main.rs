@@ -8,6 +8,14 @@ use windows::{
     Win32::UI::Shell::*,
 };
 
+mod capture;
+mod capture_window;
+mod drawing;
+mod toolbar;
+mod save;
+
+use capture_window::CaptureWindow;
+
 const CLASS_NAME: PCWSTR = w!("ModernScreenshotClass");
 const APP_NAME: PCWSTR = w!("ModernScreenshot");
 const HOTKEY_ID: i32 = 1;
@@ -83,14 +91,9 @@ impl App {
     }
 
     fn start_capture(&self) {
-        // TODO: 实现截图逻辑
         unsafe {
-            MessageBoxW(
-                self.hwnd,
-                w!("截图功能开发中..."),
-                w!("ModernScreenshot"),
-                MB_OK | MB_ICONINFORMATION,
-            );
+            let mut capture_window = CaptureWindow::new().expect("Failed to create capture window");
+            capture_window.show().expect("Failed to show capture window");
         }
     }
 }
