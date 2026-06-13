@@ -1,0 +1,16 @@
+{
+  "runtime": "win-x64",
+  "configurations": {
+    "Debug": {
+      "buildOptions": {
+        "debugType": "portable"
+      }
+    },
+    "Release": {
+      "buildOptions": {
+        "optimize": true,
+        "debugType": "none"
+      }
+    }
+  }
+}

@@ -1,0 +1,169 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '6.0.x'
+  PROJECT_NAME: ModernScreenshot
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Read version
+      id: version
+      shell: pwsh
+      run: |
+        $versionInfo = Get-Content version.json | ConvertFrom-Json
+        $version = $versionInfo.version
+        echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+        echo "Current version: $version"
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build
+      run: dotnet build --configuration Release --no-restore
+
+    - name: Publish Self-Contained
+      run: |
+        dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -p:Version=${{ steps.version.outputs.VERSION }} -o publish/self-contained
+
+    - name: Publish Framework-Dependent
+      run: |
+        dotnet publish -c Release -r win-x64 --self-contained false -p:Version=${{ steps.version.outputs.VERSION }} -o publish/framework-dependent
+
+    - name: Setup Advanced Installer
+      shell: pwsh
+      run: |
+        # Download and install WiX Toolset for MSI creation
+        Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311.exe" -OutFile "wix311.exe"
+        Start-Process -FilePath "wix311.exe" -ArgumentList "/install", "/quiet", "/norestart" -Wait
+
+    - name: Create WiX MSI Installer
+      shell: pwsh
+      run: |
+        $version = "${{ steps.version.outputs.VERSION }}"
+
+        # Create WiX source file
+        @"
+        <?xml version="1.0" encoding="UTF-8"?>
+        <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+          <Product Id="*" Name="ModernScreenshot" Language="1033" Version="$version"
+                   Manufacturer="ModernScreenshot Team" UpgradeCode="12345678-1234-1234-1234-123456789012">
+            <Package InstallerVersion="200" Compressed="yes" InstallScope="perUser" />
+            <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
+            <MediaTemplate EmbedCab="yes" />
+
+            <Directory Id="TARGETDIR" Name="SourceDir">
+              <Directory Id="LocalAppDataFolder">
+                <Directory Id="INSTALLFOLDER" Name="ModernScreenshot" />
+              </Directory>
+            </Directory>
+
+            <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+              <Component Id="MainExecutable">
+                <File Source="publish/self-contained/ModernScreenshot.exe" KeyPath="yes" />
+              </Component>
+            </ComponentGroup>
+
+            <Feature Id="ProductFeature" Title="ModernScreenshot" Level="1">
+              <ComponentGroupRef Id="ProductComponents" />
+            </Feature>
+          </Product>
+        </Wix>
+        "@ | Out-File -FilePath "installer.wxs" -Encoding UTF8
+
+        # Build MSI
+        & "C:\Program Files (x86)\WiX Toolset v3.11\bin\candle.exe" installer.wxs
+        & "C:\Program Files (x86)\WiX Toolset v3.11\bin\light.exe" -out "ModernScreenshot_$version.msi" installer.wixobj
+
+    - name: Download Inno Setup
+      shell: pwsh
+      run: |
+        Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile "innosetup.exe"
+        Start-Process -FilePath "innosetup.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -Wait
+
+    - name: Update Inno Setup Script
+      shell: pwsh
+      run: |
+        $version = "${{ steps.version.outputs.VERSION }}"
+        $content = Get-Content setup.iss -Raw
+        $content = $content -replace 'AppVersion=.*', "AppVersion=$version"
+        $content = $content -replace 'OutputBaseFilename=.*', "OutputBaseFilename=ModernScreenshot_Setup_$version"
+        $content | Set-Content setup.iss
+
+    - name: Build EXE Installer with Inno Setup
+      shell: pwsh
+      run: |
+        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+
+    - name: Create Portable ZIP (Self-Contained)
+      shell: pwsh
+      run: |
+        $version = "${{ steps.version.outputs.VERSION }}"
+        Compress-Archive -Path "publish/self-contained/*" -DestinationPath "ModernScreenshot_Portable_Full_$version.zip"
+
+    - name: Create Portable ZIP (Framework-Dependent)
+      shell: pwsh
+      run: |
+        $version = "${{ steps.version.outputs.VERSION }}"
+        Compress-Archive -Path "publish/framework-dependent/*" -DestinationPath "ModernScreenshot_Portable_$version.zip"
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-packages
+        path: |
+          ModernScreenshot_Setup_*.exe
+          ModernScreenshot_*.msi
+          ModernScreenshot_Portable_*.zip
+
+    - name: Increment version
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+      shell: pwsh
+      run: |
+        $versionInfo = Get-Content version.json | ConvertFrom-Json
+        $version = $versionInfo.version
+        $parts = $version.Split('.')
+        $parts[2] = [int]$parts[2] + 1
+        $newVersion = $parts -join '.'
+        $versionInfo.version = $newVersion
+        $versionInfo | ConvertTo-Json | Set-Content version.json
+
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git add version.json
+        git commit -m "chore: bump version to $newVersion [skip ci]"
+        git push
+
+    - name: Create Release
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.version.outputs.VERSION }}
+        name: Release v${{ steps.version.outputs.VERSION }}
+        draft: false
+        prerelease: false
+        files: |
+          ModernScreenshot_Setup_*.exe
+          ModernScreenshot_*.msi
+          ModernScreenshot_Portable_*.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
