@@ -61,7 +61,7 @@ static const int kButtonW = 58;
 static const int kButtonH = 46;
 static const int kButtonGap = 8;
 static const int kEditorMargin = 80;
-static const int kLongCaptureMaxFrames = 24;
+static const int kLongCaptureMaxFrames = 256;
 static const int kLongCaptureMaxHeight = 20000;
 static const int kLongCapturePollMs = 180;
 static const int kLongSessionW = 360;
@@ -127,7 +127,6 @@ struct ScreenCapture {
 
 struct LongFrame {
     HBITMAP bitmap = NULL;
-    int sourceY = 0;
     int copyH = 0;
 };
 
@@ -629,6 +628,40 @@ static HBITMAP CaptureScreenRect(const RECT &rect) {
     return bitmap;
 }
 
+static HBITMAP CopyBitmapStrip(HBITMAP sourceBitmap, int w, int sourceY, int copyH) {
+    if (!sourceBitmap || w <= 0 || copyH <= 0) {
+        return NULL;
+    }
+
+    HDC screen = GetDC(NULL);
+    HDC source = CreateCompatibleDC(screen);
+    HDC dest = CreateCompatibleDC(screen);
+    HBITMAP strip = CreateCompatibleBitmap(screen, w, copyH);
+    if (!source || !dest || !strip) {
+        if (strip) {
+            DeleteObject(strip);
+        }
+        if (source) {
+            DeleteDC(source);
+        }
+        if (dest) {
+            DeleteDC(dest);
+        }
+        ReleaseDC(NULL, screen);
+        return NULL;
+    }
+
+    HGDIOBJ oldSource = SelectObject(source, sourceBitmap);
+    HGDIOBJ oldDest = SelectObject(dest, strip);
+    BitBlt(dest, 0, 0, w, copyH, source, 0, sourceY, SRCCOPY);
+    SelectObject(source, oldSource);
+    SelectObject(dest, oldDest);
+    DeleteDC(source);
+    DeleteDC(dest);
+    ReleaseDC(NULL, screen);
+    return strip;
+}
+
 static bool ReadBitmapPixels(HBITMAP bitmap, int w, int h, std::vector<BYTE> *pixels) {
     if (!bitmap || w <= 0 || h <= 0) {
         return false;
@@ -754,7 +787,7 @@ static HBITMAP StitchLongFrames(const std::vector<LongFrame> &frames, int w, int
     int y = 0;
     for (const LongFrame &frame : frames) {
         HGDIOBJ oldSource = SelectObject(source, frame.bitmap);
-        BitBlt(dest, 0, y, w, frame.copyH, source, 0, frame.sourceY, SRCCOPY);
+        BitBlt(dest, 0, y, w, frame.copyH, source, 0, 0, SRCCOPY);
         SelectObject(source, oldSource);
         y += frame.copyH;
     }
@@ -1086,7 +1119,7 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
     }
 
     if (!state->hasPrev) {
-        state->frames.push_back({bitmap, 0, state->h});
+        state->frames.push_back({bitmap, state->h});
         state->prevPixels.swap(*pixels);
         state->totalH = state->h;
         state->hasPrev = true;
@@ -1100,7 +1133,7 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
 
     int overlap = EstimateOverlap(state->prevPixels, *pixels, state->w, state->h);
     int copyH = state->h - overlap;
-    if (copyH < 32 || state->totalH >= kLongCaptureMaxHeight ||
+    if (copyH < 6 || state->totalH >= kLongCaptureMaxHeight ||
         static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
         DeleteObject(bitmap);
         return false;
@@ -1113,7 +1146,12 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
         return false;
     }
 
-    state->frames.push_back({bitmap, overlap, copyH});
+    HBITMAP strip = CopyBitmapStrip(bitmap, state->w, overlap, copyH);
+    DeleteObject(bitmap);
+    if (!strip) {
+        return false;
+    }
+    state->frames.push_back({strip, copyH});
     state->totalH += copyH;
     state->prevPixels.swap(*pixels);
     return true;
@@ -1306,30 +1344,25 @@ static void DrawLongPreview(LongSessionState *state, HDC dc, const RECT &preview
     }
 
     int drawW = contentW;
-    int drawH = std::max(1, state->totalH * drawW / state->w);
-    if (drawH < contentH && state->totalH > 0) {
-        drawH = std::min(contentH, drawH);
-    }
+    int totalScaledH = std::max(1, state->totalH * drawW / state->w);
+    int visibleTop = std::max(0, totalScaledH - contentH);
     int drawX = content.left;
-    int drawY = content.bottom - drawH;
-    int y = drawY;
 
     HDC source = CreateCompatibleDC(dc);
     if (!source) {
         return;
     }
 
-    int visibleTop = std::max(0, drawH - contentH);
     int scaledY = 0;
     for (const LongFrame &frame : state->frames) {
         int frameScaledH = std::max(1, frame.copyH * drawW / state->w);
-        int destTop = y + scaledY - visibleTop;
+        int destTop = content.top + scaledY - visibleTop;
         int destBottom = destTop + frameScaledH;
         if (destBottom > content.top && destTop < content.bottom) {
             int clippedTop = std::max(destTop, static_cast<int>(content.top));
             int clippedBottom = std::min(destBottom, static_cast<int>(content.bottom));
             int clippedH = clippedBottom - clippedTop;
-            int srcY = frame.sourceY + std::max(0, (clippedTop - destTop) * frame.copyH / frameScaledH);
+            int srcY = std::max(0, (clippedTop - destTop) * frame.copyH / frameScaledH);
             int srcH = std::max(1, clippedH * frame.copyH / frameScaledH);
             HGDIOBJ oldSource = SelectObject(source, frame.bitmap);
             SetStretchBltMode(dc, HALFTONE);
@@ -1401,6 +1434,36 @@ static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
     DrawCenteredText(dc, L"Cancel", cancel, -14, FW_SEMIBOLD, RGB(245, 251, 248));
 }
 
+static void PaintLongSessionBuffered(HWND hwnd, LongSessionState *state, HDC dc, const RECT &paint) {
+    int w = RectWidth(paint);
+    int h = RectHeight(paint);
+    if (!state || w <= 0 || h <= 0) {
+        return;
+    }
+
+    HDC memory = CreateCompatibleDC(dc);
+    HBITMAP buffer = CreateCompatibleBitmap(dc, w, h);
+    if (!memory || !buffer) {
+        if (buffer) {
+            DeleteObject(buffer);
+        }
+        if (memory) {
+            DeleteDC(memory);
+        }
+        DrawLongSession(hwnd, state, dc);
+        return;
+    }
+
+    HGDIOBJ old = SelectObject(memory, buffer);
+    SetViewportOrgEx(memory, -paint.left, -paint.top, NULL);
+    DrawLongSession(hwnd, state, memory);
+    SetViewportOrgEx(memory, 0, 0, NULL);
+    BitBlt(dc, paint.left, paint.top, w, h, memory, 0, 0, SRCCOPY);
+    SelectObject(memory, old);
+    DeleteObject(buffer);
+    DeleteDC(memory);
+}
+
 static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     LongSessionState *state = reinterpret_cast<LongSessionState *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
@@ -1412,12 +1475,15 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
         SetTimer(hwnd, 1, kLongCapturePollMs, NULL);
         return 0;
     }
+    case WM_ERASEBKGND:
+        return 1;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
     case WM_TIMER:
         if (state) {
-            SampleLongSelection(state);
-            InvalidateRect(hwnd, NULL, FALSE);
+            if (SampleLongSelection(state)) {
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
             if (state->totalH >= kLongCaptureMaxHeight ||
                 static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
                 state->done = true;
@@ -1440,6 +1506,8 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
         break;
     case WM_KEYDOWN:
         if (wParam == VK_RETURN && state) {
+            Sleep(80);
+            SampleLongSelection(state);
             state->done = true;
             DestroyWindow(hwnd);
             return 0;
@@ -1469,6 +1537,8 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
             RECT done = LongDoneRect();
             RECT cancel = LongCancelRect();
             if (PointInRect(x, y, done)) {
+                Sleep(80);
+                SampleLongSelection(state);
                 state->done = true;
                 DestroyWindow(hwnd);
             } else if (PointInRect(x, y, cancel)) {
@@ -1484,7 +1554,7 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
         if (state) {
-            DrawLongSession(hwnd, state, dc);
+            PaintLongSessionBuffered(hwnd, state, dc, ps.rcPaint);
         }
         EndPaint(hwnd, &ps);
         return 0;
