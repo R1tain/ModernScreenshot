@@ -49,11 +49,8 @@ jobs:
       run: |
         dotnet publish -c Release -r win-x64 --self-contained false -p:Version=${{ steps.version.outputs.VERSION }} -o publish/framework-dependent
 
-    - name: Download Inno Setup
-      shell: pwsh
-      run: |
-        Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile "innosetup.exe"
-        Start-Process -FilePath "innosetup.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -Wait
+    - name: Install Inno Setup
+      run: choco install innosetup -y
 
     - name: Update Inno Setup Script
       shell: pwsh
