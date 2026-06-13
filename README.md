@@ -23,13 +23,12 @@
 | 文件 | 说明 | 大小 |
 |------|------|------|
 | `ModernScreenshot_Setup_x.x.x.exe` | 安装程序（推荐） | ~5 MB |
-| `ModernScreenshot_x.x.x.msi` | MSI 安装包 | ~5 MB |
-| `ModernScreenshot_Portable_x.x.x.zip` | 绿色便携版（需 .NET 6.0） | ~1 MB |
+| `ModernScreenshot_Portable_x.x.x.zip` | 绿色便携版（需 .NET 8.0） | ~1 MB |
 | `ModernScreenshot_Portable_Full_x.x.x.zip` | 完整便携版（含运行时） | ~70 MB |
 
 ### 系统要求
 - Windows 10/11 (x64)
-- .NET 6.0 Desktop Runtime（安装程序版本会自动处理）
+- .NET 8.0 Desktop Runtime（安装程序版本会自动处理）
 
 ## 📖 使用说明
 
@@ -68,7 +67,7 @@ D:\ModernScreenshot\              # 应用程序根目录
 ## 🏗️ 从源码构建
 
 ### 前置要求
-- [.NET 6.0 SDK](https://dotnet.microsoft.com/download/dotnet/6.0)
+- [.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
 - Windows 10/11
 
 ### 构建步骤
@@ -104,4 +103,4 @@ MIT License
 
 ---
 
-**技术栈**: .NET 6.0 | WinForms | GDI+ | GitHub Actions
+**技术栈**: .NET 8.0 | WinForms | GDI+ | GitHub Actions
