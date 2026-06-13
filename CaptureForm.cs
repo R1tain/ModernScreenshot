@@ -410,128 +410,167 @@ namespace ModernScreenshot
         {
             if (toolbarPanel != null) return;
 
-            // 使用现代化毛玻璃工具栏
-            var modernToolbar = new ModernToolbar
+            // 使用 Pixpin 风格工具栏
+            var toolbar = new PixpinToolbar
             {
-                Size = new Size(720, 60),
+                Size = new Size(660, 50),
                 Location = new Point(selectionRect.X, selectionRect.Bottom + 10)
             };
 
             // 确保工具栏在屏幕内
-            if (modernToolbar.Bottom > this.Height)
+            if (toolbar.Bottom > this.Height)
             {
-                modernToolbar.Location = new Point(selectionRect.X, selectionRect.Y - 70);
+                toolbar.Location = new Point(selectionRect.X, selectionRect.Y - 60);
             }
-            if (modernToolbar.Right > this.Width)
+            if (toolbar.Right > this.Width)
             {
-                modernToolbar.Location = new Point(this.Width - modernToolbar.Width - 10, modernToolbar.Location.Y);
+                toolbar.Location = new Point(this.Width - toolbar.Width - 10, toolbar.Location.Y);
             }
 
-            int x = 15;
-            int spacing = 10;
+            int x = 10;
+            int spacing = 4;
 
-            // 工具按钮
-            AddModernToolButton(modernToolbar, "□", "矩形", ref x, spacing, ToolMode.Rectangle);
-            AddModernToolButton(modernToolbar, "→", "箭头", ref x, spacing, ToolMode.Arrow);
-            AddModernToolButton(modernToolbar, "✎", "画笔", ref x, spacing, ToolMode.Pen);
-            AddModernToolButton(modernToolbar, "A", "文字", ref x, spacing, ToolMode.Text);
-            AddModernToolButton(modernToolbar, "⊞", "马赛克", ref x, spacing, ToolMode.Mosaic);
+            // 工具按钮 - 只显示图标
+            var rectBtn = CreateToolButton("□", "矩形", x, 7, ToolMode.Rectangle);
+            toolbar.Controls.Add(rectBtn);
+            x += rectBtn.Width + spacing;
 
-            x += 5;
+            var arrowBtn = CreateToolButton("→", "箭头", x, 7, ToolMode.Arrow);
+            toolbar.Controls.Add(arrowBtn);
+            x += arrowBtn.Width + spacing;
+
+            var penBtn = CreateToolButton("✎", "画笔", x, 7, ToolMode.Pen);
+            toolbar.Controls.Add(penBtn);
+            x += penBtn.Width + spacing;
+
+            var textBtn = CreateToolButton("A", "文字", x, 7, ToolMode.Text);
+            toolbar.Controls.Add(textBtn);
+            x += textBtn.Width + spacing;
+
+            var mosaicBtn = CreateToolButton("⊞", "马赛克", x, 7, ToolMode.Mosaic);
+            toolbar.Controls.Add(mosaicBtn);
+            x += mosaicBtn.Width + spacing;
+
+            // 分隔线
+            x += 6;
+            var sep1 = new ToolbarSeparator { Location = new Point(x, 13) };
+            toolbar.Controls.Add(sep1);
+            x += sep1.Width + 6;
 
             // 撤销/重做
-            var undoBtn = CreateModernButton("↶", "撤销", x, 10, false);
-            undoBtn.Click += (s, e) => Undo();
-            modernToolbar.Controls.Add(undoBtn);
+            var undoBtn = CreateActionButton("↶", "撤销", x, 7);
+            undoBtn.ButtonClick += (s, e) => Undo();
+            toolbar.Controls.Add(undoBtn);
             x += undoBtn.Width + spacing;
 
-            var redoBtn = CreateModernButton("↷", "重做", x, 10, false);
-            redoBtn.Click += (s, e) => Redo();
-            modernToolbar.Controls.Add(redoBtn);
-            x += redoBtn.Width + spacing + 5;
+            var redoBtn = CreateActionButton("↷", "重做", x, 7);
+            redoBtn.ButtonClick += (s, e) => Redo();
+            toolbar.Controls.Add(redoBtn);
+            x += redoBtn.Width + spacing;
 
-            // 保存按钮 - 突出显示
-            var saveBtn = CreateModernButton("💾", "保存", x, 10, true);
-            saveBtn.Size = new Size(100, 40);
-            saveBtn.IsPrimary = true;
-            saveBtn.Click += (s, e) => SaveToFile();
-            modernToolbar.Controls.Add(saveBtn);
+            // 分隔线
+            x += 6;
+            var sep2 = new ToolbarSeparator { Location = new Point(x, 13) };
+            toolbar.Controls.Add(sep2);
+            x += sep2.Width + 6;
+
+            // 保存按钮 - 主按钮，加宽突出
+            var saveBtn = new PixpinButton
+            {
+                Location = new Point(x, 7),
+                Size = new Size(80, 36),
+                IconText = "💾",
+                ButtonText = "保存",
+                IsPrimary = true,
+                IsIconOnly = false,
+                Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold)
+            };
+            saveBtn.ButtonClick += (s, e) => SaveToFile();
+            toolbar.Controls.Add(saveBtn);
             x += saveBtn.Width + spacing;
 
             // 复制按钮
-            var copyBtn = CreateModernButton("📋", "复制", x, 10, false);
-            copyBtn.Size = new Size(90, 40);
-            copyBtn.Click += (s, e) => CopyToClipboard();
-            modernToolbar.Controls.Add(copyBtn);
+            var copyBtn = CreateActionButton("📋", "复制", x, 7);
+            copyBtn.ButtonClick += (s, e) => CopyToClipboard();
+            toolbar.Controls.Add(copyBtn);
             x += copyBtn.Width + spacing;
 
             // 钉图按钮
-            var pinBtn = CreateModernButton("📌", "钉图", x, 10, false);
-            pinBtn.Click += (s, e) => PinImage();
-            modernToolbar.Controls.Add(pinBtn);
+            var pinBtn = CreateActionButton("📌", "钉图", x, 7);
+            pinBtn.ButtonClick += (s, e) => PinImage();
+            toolbar.Controls.Add(pinBtn);
             x += pinBtn.Width + spacing;
 
-            // 取消按钮
-            var cancelBtn = CreateModernButton("✕", "取消", x, 10, false);
-            cancelBtn.Click += (s, e) => this.Close();
-            modernToolbar.Controls.Add(cancelBtn);
+            // 分隔线
+            x += 6;
+            var sep3 = new ToolbarSeparator { Location = new Point(x, 13) };
+            toolbar.Controls.Add(sep3);
+            x += sep3.Width + 6;
 
-            toolbarPanel = modernToolbar;
+            // 取消按钮
+            var cancelBtn = CreateActionButton("✕", "取消", x, 7);
+            cancelBtn.ButtonClick += (s, e) => this.Close();
+            toolbar.Controls.Add(cancelBtn);
+
+            toolbarPanel = toolbar;
             this.Controls.Add(toolbarPanel);
             toolbarPanel.BringToFront();
         }
 
-        private ModernButton CreateModernButton(string icon, string text, int x, int y, bool showIcon)
+        private PixpinButton CreateToolButton(string icon, string tooltip, int x, int y, ToolMode mode)
         {
-            var btn = new ModernButton
+            var btn = new PixpinButton
             {
                 Location = new Point(x, y),
-                Size = new Size(80, 40),
-                Text = text,
-                IconText = showIcon ? icon : "",
-                Font = new Font("Segoe UI", 9F, FontStyle.Regular)
-            };
-            return btn;
-        }
-
-        private void AddModernToolButton(ModernToolbar toolbar, string icon, string text, ref int x, int spacing, ToolMode mode)
-        {
-            var btn = new ModernButton
-            {
-                Location = new Point(x, 10),
-                Size = new Size(70, 40),
-                Text = text,
+                Size = new Size(44, 36),
                 IconText = icon,
+                ButtonText = tooltip,
+                IsIconOnly = true,
                 Tag = mode
             };
 
-            btn.Click += (s, e) =>
+            btn.ButtonClick += (s, e) =>
             {
-                // 取消其他工具按钮
-                foreach (Control ctrl in toolbar.Controls)
+                // 取消其他工具按钮的选中状态
+                if (toolbarPanel != null)
                 {
-                    if (ctrl is ModernButton mb && mb != btn && mb.Tag is ToolMode)
+                    foreach (Control ctrl in toolbarPanel.Controls)
                     {
-                        mb.BackColor = Color.Transparent;
+                        if (ctrl is PixpinButton pb && pb != btn && pb.Tag is ToolMode)
+                        {
+                            pb.Selected = false;
+                        }
                     }
                 }
 
+                // 切换当前工具
                 if (currentTool == mode)
                 {
                     currentTool = ToolMode.None;
-                    btn.BackColor = Color.Transparent;
+                    btn.Selected = false;
                     this.Cursor = Cursors.Default;
                 }
                 else
                 {
                     currentTool = mode;
-                    btn.BackColor = Color.FromArgb(100, 0, 120, 215);
+                    btn.Selected = true;
                     this.Cursor = Cursors.Cross;
                 }
             };
 
-            toolbar.Controls.Add(btn);
-            x += btn.Width + spacing;
+            return btn;
+        }
+
+        private PixpinButton CreateActionButton(string icon, string text, int x, int y)
+        {
+            return new PixpinButton
+            {
+                Location = new Point(x, y),
+                Size = new Size(68, 36),
+                IconText = icon,
+                ButtonText = text,
+                IsIconOnly = false
+            };
         }
 
         private Color GetContrastColor(Color color)
