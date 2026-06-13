@@ -49,51 +49,6 @@ jobs:
       run: |
         dotnet publish -c Release -r win-x64 --self-contained false -p:Version=${{ steps.version.outputs.VERSION }} -o publish/framework-dependent
 
-    - name: Setup Advanced Installer
-      shell: pwsh
-      run: |
-        # Download and install WiX Toolset for MSI creation
-        Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311.exe" -OutFile "wix311.exe"
-        Start-Process -FilePath "wix311.exe" -ArgumentList "/install", "/quiet", "/norestart" -Wait
-
-    - name: Create WiX MSI Installer
-      shell: pwsh
-      run: |
-        $version = "${{ steps.version.outputs.VERSION }}"
-
-        # Create WiX source file
-        @"
-        <?xml version="1.0" encoding="UTF-8"?>
-        <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-          <Product Id="*" Name="ModernScreenshot" Language="1033" Version="$version"
-                   Manufacturer="ModernScreenshot Team" UpgradeCode="12345678-1234-1234-1234-123456789012">
-            <Package InstallerVersion="200" Compressed="yes" InstallScope="perUser" />
-            <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
-            <MediaTemplate EmbedCab="yes" />
-
-            <Directory Id="TARGETDIR" Name="SourceDir">
-              <Directory Id="LocalAppDataFolder">
-                <Directory Id="INSTALLFOLDER" Name="ModernScreenshot" />
-              </Directory>
-            </Directory>
-
-            <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
-              <Component Id="MainExecutable">
-                <File Source="publish/self-contained/ModernScreenshot.exe" KeyPath="yes" />
-              </Component>
-            </ComponentGroup>
-
-            <Feature Id="ProductFeature" Title="ModernScreenshot" Level="1">
-              <ComponentGroupRef Id="ProductComponents" />
-            </Feature>
-          </Product>
-        </Wix>
-        "@ | Out-File -FilePath "installer.wxs" -Encoding UTF8
-
-        # Build MSI
-        & "C:\Program Files (x86)\WiX Toolset v3.11\bin\candle.exe" installer.wxs
-        & "C:\Program Files (x86)\WiX Toolset v3.11\bin\light.exe" -out "ModernScreenshot_$version.msi" installer.wixobj
-
     - name: Download Inno Setup
       shell: pwsh
       run: |
@@ -107,6 +62,7 @@ jobs:
         $content = Get-Content setup.iss -Raw
         $content = $content -replace 'AppVersion=.*', "AppVersion=$version"
         $content = $content -replace 'OutputBaseFilename=.*', "OutputBaseFilename=ModernScreenshot_Setup_$version"
+        $content = $content -replace 'Source:.*publish.*', "Source: `"publish\self-contained\*`"; DestDir: `"{app}`"; Flags: ignoreversion recursesubdirs createallsubdirs"
         $content | Set-Content setup.iss
 
     - name: Build EXE Installer with Inno Setup
@@ -132,7 +88,6 @@ jobs:
         name: release-packages
         path: |
           ModernScreenshot_Setup_*.exe
-          ModernScreenshot_*.msi
           ModernScreenshot_Portable_*.zip
 
     - name: Increment version
@@ -163,7 +118,6 @@ jobs:
         prerelease: false
         files: |
           ModernScreenshot_Setup_*.exe
-          ModernScreenshot_*.msi
           ModernScreenshot_Portable_*.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
