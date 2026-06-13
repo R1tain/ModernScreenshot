@@ -107,6 +107,7 @@ jobs:
       - linux
       - windows
     steps:
+      - uses: actions/checkout@v4
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
