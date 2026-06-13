@@ -24,6 +24,7 @@ $CommonArgs = @(
     "/nologo",
     "/std:c++17",
     "/EHsc",
+    "/utf-8",
     "/DUNICODE",
     "/D_UNICODE",
     "/DVERSION=`"$Version`"",

@@ -185,6 +185,8 @@ struct EditorState {
     std::wstring textBuffer;
     std::wstring statusText;
     bool done = false;
+    int hoverButton = -1;
+    bool tracking = false;
 };
 
 struct Settings {
@@ -1931,43 +1933,63 @@ static void DrawToolbarIcon(HDC dc, Action action, const RECT &button, bool acti
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
         Color iconColor(255, GetRValue(color), GetGValue(color), GetBValue(color));
         Color muted(170, GetRValue(color), GetGValue(color), GetBValue(color));
-        Pen pen(iconColor, 2.2f);
-        Pen thin(muted, 1.5f);
+        Pen pen(iconColor, 2.0f);
+        Pen thin(muted, 1.4f);
         SolidBrush brush(iconColor);
         float cx = x + w / 2.0f;
         float top = y + 9.0f;
 
         if (action == ActionToolBlur) {
-            float s = 6.5f;
-            float startX = cx - 8.0f;
-            graphics.FillRectangle(&brush, startX, top + 2.0f, s, s);
-            graphics.FillRectangle(&brush, startX + 10.0f, top + 2.0f, s, s);
-            graphics.FillRectangle(&brush, startX, top + 12.0f, s, s);
-            graphics.FillRectangle(&brush, startX + 10.0f, top + 12.0f, s, s);
+            float s = 6.0f;
+            float gap = 2.0f;
+            float startX = cx - s - gap / 2.0f;
+            float startY = top + 3.0f;
+            graphics.FillRectangle(&brush, startX, startY, s, s);
+            graphics.FillRectangle(&brush, startX + s + gap, startY, s, s);
+            graphics.FillRectangle(&brush, startX, startY + s + gap, s, s);
+            graphics.FillRectangle(&brush, startX + s + gap, startY + s + gap, s, s);
         } else if (action == ActionToolArrow) {
-            graphics.DrawLine(&pen, cx - 12.0f, top + 18.0f, cx + 11.0f, top + 5.0f);
-            graphics.DrawLine(&pen, cx + 11.0f, top + 5.0f, cx + 3.0f, top + 5.0f);
-            graphics.DrawLine(&pen, cx + 11.0f, top + 5.0f, cx + 9.0f, top + 13.0f);
+            Pen shaft(iconColor, 2.2f);
+            shaft.SetEndCap(Gdiplus::LineCapRound);
+            shaft.SetStartCap(Gdiplus::LineCapRound);
+            graphics.DrawLine(&shaft, cx - 10.0f, top + 16.0f, cx + 10.0f, top + 4.0f);
+            PointF head[3] = {
+                PointF(cx + 11.0f, top + 3.0f),
+                PointF(cx + 3.0f, top + 5.0f),
+                PointF(cx + 8.0f, top + 11.0f)
+            };
+            graphics.FillPolygon(&brush, head, 3);
         } else if (action == ActionToolRect) {
-            graphics.DrawRectangle(&pen, cx - 12.0f, top + 4.0f, 24.0f, 16.0f);
+            graphics.DrawRectangle(&pen, cx - 11.0f, top + 4.0f, 22.0f, 15.0f);
         } else if (action == ActionUndo) {
-            graphics.DrawArc(&pen, cx - 12.0f, top + 4.0f, 24.0f, 18.0f, 35.0f, 285.0f);
-            graphics.DrawLine(&pen, cx - 12.0f, top + 11.0f, cx - 6.0f, top + 4.0f);
-            graphics.DrawLine(&pen, cx - 12.0f, top + 11.0f, cx - 4.0f, top + 13.0f);
+            Font glyph(L"Segoe MDL2 Assets", 19.0f, FontStyleRegular, UnitPixel);
+            Gdiplus::StringFormat fmt;
+            fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+            RectF target(x, top - 2.0f, w, 24.0f);
+            graphics.DrawString(L"", -1, &glyph, target, &fmt, &brush);
         } else if (action == ActionCopy) {
-            graphics.DrawRectangle(&thin, cx - 7.0f, top + 3.0f, 16.0f, 15.0f);
-            graphics.DrawRectangle(&pen, cx - 11.0f, top + 8.0f, 16.0f, 15.0f);
+            Font glyph(L"Segoe MDL2 Assets", 17.0f, FontStyleRegular, UnitPixel);
+            Gdiplus::StringFormat fmt;
+            fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+            RectF target(x, top - 1.0f, w, 24.0f);
+            graphics.DrawString(L"", -1, &glyph, target, &fmt, &brush);
         } else if (action == ActionSave) {
-            graphics.DrawLine(&pen, cx, top + 3.0f, cx, top + 17.0f);
-            graphics.DrawLine(&pen, cx, top + 17.0f, cx - 6.0f, top + 11.0f);
-            graphics.DrawLine(&pen, cx, top + 17.0f, cx + 6.0f, top + 11.0f);
-            graphics.DrawLine(&pen, cx - 11.0f, top + 22.0f, cx + 11.0f, top + 22.0f);
+            Font glyph(L"Segoe MDL2 Assets", 18.0f, FontStyleRegular, UnitPixel);
+            Gdiplus::StringFormat fmt;
+            fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+            RectF target(x, top - 2.0f, w, 24.0f);
+            graphics.DrawString(L"", -1, &glyph, target, &fmt, &brush);
         } else {
-            Font font(L"Segoe UI", 23.0f, FontStyleBold, UnitPixel);
-            graphics.DrawString(L"T", -1, &font, PointF(cx - 7.0f, top - 1.0f), &brush);
+            Font font(L"Segoe UI", 22.0f, FontStyleBold, UnitPixel);
+            Gdiplus::StringFormat fmt;
+            fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+            RectF target(x, top - 3.0f, w, 24.0f);
+            graphics.DrawString(L"T", -1, &font, target, &fmt, &brush);
         }
+        (void)thin;
         return;
     }
 
@@ -1983,6 +2005,32 @@ static void DrawToolbarIcon(HDC dc, Action action, const RECT &button, bool acti
         SelectObject(dc, oldPen);
         DeleteObject(pen);
     }
+}
+
+static bool IsToolButton(int i) {
+    return kButtons[i].action == ActionToolBlur || kButtons[i].action == ActionToolArrow ||
+           kButtons[i].action == ActionToolRect || kButtons[i].action == ActionToolText;
+}
+
+static int ToolbarToolGroupEnd() {
+    for (int i = 0; i < ButtonCount(); ++i) {
+        if (!IsToolButton(i)) {
+            return i;
+        }
+    }
+    return ButtonCount();
+}
+
+static int ToolbarHitButton(int x, int y) {
+    if (y < 0 || y >= kToolbarH) {
+        return -1;
+    }
+    for (int i = 0; i < ButtonCount(); ++i) {
+        if (PointInRect(x, y, ButtonRect(i))) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 static void DrawToolbar(EditorState *state, HDC dc) {
@@ -2005,11 +2053,13 @@ static void DrawToolbar(EditorState *state, HDC dc) {
         DeleteObject(border);
     }
 
+    int separatorAfter = ToolbarToolGroupEnd();
+
     for (int i = 0; i < ButtonCount(); ++i) {
         RECT button = ButtonRect(i);
-        bool isTool = kButtons[i].action == ActionToolBlur || kButtons[i].action == ActionToolArrow ||
-                      kButtons[i].action == ActionToolRect || kButtons[i].action == ActionToolText;
+        bool isTool = IsToolButton(i);
         bool active = isTool && kButtons[i].tool == state->activeTool;
+        bool hover = i == state->hoverButton;
         if (StartGdiplus()) {
             Graphics graphics(dc);
             graphics.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -2017,12 +2067,16 @@ static void DrawToolbar(EditorState *state, HDC dc) {
             BuildRoundedRectPath(&path, static_cast<float>(button.left), static_cast<float>(button.top),
                                  static_cast<float>(RectWidth(button)),
                                  static_cast<float>(RectHeight(button)), 8.0f);
-            SolidBrush fill(active ? Color(255, 28, 48, 52) : Color(255, 21, 28, 31));
-            Pen outline(active ? Color(255, 23, 198, 163) : Color(120, 82, 98, 100), active ? 1.6f : 1.0f);
+            Color fillColor = active ? (hover ? Color(255, 34, 60, 64) : Color(255, 28, 48, 52))
+                                     : (hover ? Color(255, 30, 40, 46) : Color(255, 21, 28, 31));
+            Color outlineColor = active ? Color(255, 23, 198, 163)
+                                        : (hover ? Color(255, 138, 168, 170) : Color(120, 82, 98, 100));
+            SolidBrush fill(fillColor);
+            Pen outline(outlineColor, active ? 1.6f : 1.0f);
             graphics.FillPath(&fill, &path);
             graphics.DrawPath(&outline, &path);
         } else {
-            FillRectColor(dc, button, active ? RGB(33, 49, 56) : RGB(22, 29, 34));
+            FillRectColor(dc, button, active ? RGB(33, 49, 56) : (hover ? RGB(28, 38, 44) : RGB(22, 29, 34)));
             HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(23, 198, 163) : RGB(58, 74, 80));
             HGDIOBJ old = SelectObject(dc, pen);
             HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
@@ -2034,12 +2088,31 @@ static void DrawToolbar(EditorState *state, HDC dc) {
 
         DrawToolbarIcon(dc, kButtons[i].action, button, active);
         RECT labelRect = {button.left, button.bottom - 15, button.right, button.bottom - 2};
-        DrawCenteredText(dc, kButtons[i].label, labelRect, -10, FW_MEDIUM,
-                         active ? RGB(23, 198, 163) : RGB(188, 202, 200));
+        COLORREF labelColor = active ? RGB(23, 198, 163)
+                                     : (hover ? RGB(220, 232, 232) : RGB(176, 192, 192));
+        DrawCenteredText(dc, kButtons[i].label, labelRect, -10, FW_MEDIUM, labelColor);
+
+        if (i + 1 == separatorAfter && separatorAfter < ButtonCount()) {
+            RECT next = ButtonRect(i + 1);
+            int sepX = (button.right + next.left) / 2;
+            if (StartGdiplus()) {
+                Graphics graphics(dc);
+                graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+                Pen sep(Color(180, 78, 96, 100), 1.0f);
+                graphics.DrawLine(&sep, sepX, button.top + 6, sepX, button.bottom - 6);
+            } else {
+                HPEN sep = CreatePen(PS_SOLID, 1, RGB(78, 96, 100));
+                HGDIOBJ oldSep = SelectObject(dc, sep);
+                MoveToEx(dc, sepX, button.top + 6, NULL);
+                LineTo(dc, sepX, button.bottom - 6);
+                SelectObject(dc, oldSep);
+                DeleteObject(sep);
+            }
+        }
     }
 
     if (!state->statusText.empty() && state->winW > ToolbarWidth() + 120) {
-        DrawTextLabel(dc, state->statusText, ToolbarWidth() + 8, 22, RGB(188, 202, 200));
+        DrawTextLabel(dc, state->statusText, ToolbarWidth() + 16, 22, RGB(188, 202, 200));
     }
 }
 
@@ -2470,10 +2543,37 @@ static LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         }
         return 0;
     case WM_MOUSEMOVE:
-        if (state && state->drawing) {
-            POINT point = ToImagePoint(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-            state->preview.b = point;
-            InvalidateRect(hwnd, NULL, FALSE);
+        if (state) {
+            int mx = GET_X_LPARAM(lParam);
+            int my = GET_Y_LPARAM(lParam);
+            if (state->drawing) {
+                POINT point = ToImagePoint(state, mx, my);
+                state->preview.b = point;
+                InvalidateRect(hwnd, NULL, FALSE);
+            } else {
+                int over = ToolbarHitButton(mx, my);
+                if (over != state->hoverButton) {
+                    state->hoverButton = over;
+                    RECT toolbarRect = {0, 0, state->winW, kToolbarH};
+                    InvalidateRect(hwnd, &toolbarRect, FALSE);
+                }
+                if (!state->tracking) {
+                    TRACKMOUSEEVENT track = {sizeof(track), TME_LEAVE, hwnd, 0};
+                    if (TrackMouseEvent(&track)) {
+                        state->tracking = true;
+                    }
+                }
+            }
+        }
+        return 0;
+    case WM_MOUSELEAVE:
+        if (state) {
+            state->tracking = false;
+            if (state->hoverButton != -1) {
+                state->hoverButton = -1;
+                RECT toolbarRect = {0, 0, state->winW, kToolbarH};
+                InvalidateRect(hwnd, &toolbarRect, FALSE);
+            }
         }
         return 0;
     case WM_MOUSEWHEEL:
