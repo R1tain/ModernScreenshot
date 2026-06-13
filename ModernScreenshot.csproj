@@ -7,10 +7,15 @@
     <AssemblyName>ModernScreenshot</AssemblyName>
     <RootNamespace>ModernScreenshot</RootNamespace>
     <Nullable>enable</Nullable>
+    <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 
   <PropertyGroup>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="app.ico" />
+  </ItemGroup>
 
 </Project>

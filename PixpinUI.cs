@@ -14,6 +14,7 @@ namespace ModernScreenshot
         public PixpinToolbar()
         {
             this.DoubleBuffered = true;
+            this.SetStyle(ControlStyles.SupportsTransparentBackColor, true);
             this.BackColor = Color.Transparent;
             this.Height = 50;
         }
@@ -82,6 +83,8 @@ namespace ModernScreenshot
             this.Size = new Size(44, 36);
             this.Cursor = Cursors.Hand;
             this.Font = new Font("Microsoft YaHei UI", 9F);
+            this.SetStyle(ControlStyles.SupportsTransparentBackColor, true);
+            this.BackColor = Color.Transparent;
         }
 
         public bool Selected
@@ -283,6 +286,7 @@ namespace ModernScreenshot
         {
             this.Width = 1;
             this.Height = 24;
+            this.SetStyle(ControlStyles.SupportsTransparentBackColor, true);
             this.BackColor = Color.Transparent;
         }
 
