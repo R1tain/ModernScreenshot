@@ -94,7 +94,7 @@ For a Windows long screenshot, press the capture hotkey and click `Long` in the 
 .\build\windows\ModernScreenshot.exe --long
 ```
 
-Drag the visible scrollable content area, then scroll the target page yourself with the mouse wheel or scrollbar. A small floating controller shows captured frames; click `Done` when you reach the desired end point. Long capture works best when you select only the scrolling content area and scroll smoothly.
+Drag the visible scrollable content area. ModernScreenshot then scrolls the target window in small steps, waits for the content to settle, captures each step, and opens the stitched image in the editor when it reaches the bottom. The floating controller shows progress and has `Stop` if you want to finish early. Long capture works best when you select only the scrolling content area and avoid including fixed headers or scrollbars.
 
 For an automated editor export test:
 

@@ -63,8 +63,8 @@ static const int kButtonGap = 8;
 static const int kEditorMargin = 80;
 static const int kLongCaptureMaxFrames = 256;
 static const int kLongCaptureMaxHeight = 60000;
-static const int kLongCapturePollMs = 90;
-static const int kLongWheelThrottleMs = 120;
+static const int kLongScrollWaitMs = 260;
+static const int kLongScrollPixels = 220;
 static const int kLongSessionW = 360;
 static const int kLongSessionH = 520;
 static const int kSettingsApply = 3001;
@@ -147,14 +147,16 @@ struct LongSessionState {
     RECT selection = {0, 0, 0, 0};
     bool done = false;
     bool cancelled = false;
+    bool started = false;
     bool hasPrev = false;
     int w = 0;
     int h = 0;
     int totalH = 0;
     int skippedFrames = 0;
     int lastCopyH = 0;
+    int unchangedSteps = 0;
     bool captureLimitReached = false;
-    DWORD lastWheelTick = 0;
+    std::wstring statusText;
     HWND target = NULL;
     HWND targetRoot = NULL;
     std::vector<LongFrame> frames;
@@ -200,8 +202,6 @@ static HICON g_trayIcon = NULL;
 static Settings g_settings;
 static bool g_hotkeyRegistered = false;
 static bool g_captureActive = false;
-static LongSessionState *g_longSession = NULL;
-static HHOOK g_longMouseHook = NULL;
 
 static void ShowTrayBalloon(HWND hwnd, const std::wstring &title, const std::wstring &message);
 
@@ -881,7 +881,7 @@ static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offset
     if (state->showModeButtons) {
         DrawOverlayModeButton(dc, OverlayModeRect(0), L"Screenshot", state->kind == CaptureRegion, offsetX, offsetY);
         DrawOverlayModeButton(dc, OverlayModeRect(1), L"Long", state->kind == CaptureLongRegion, offsetX, offsetY);
-        DrawTextLabel(dc, state->kind == CaptureLongRegion ? L"Drag scroll area, then scroll the page" : L"Drag to capture region",
+        DrawTextLabel(dc, state->kind == CaptureLongRegion ? L"Drag scroll area for auto capture" : L"Drag to capture region",
                       16 - offsetX, 58 - offsetY, RGB(245, 251, 248));
     }
 
@@ -1193,32 +1193,6 @@ static bool SampleLongSelection(LongSessionState *state) {
     return AddLongFrame(state, bitmap, &pixels);
 }
 
-static WORD CurrentMouseKeyState() {
-    WORD keys = 0;
-    if (GetKeyState(VK_LBUTTON) < 0) {
-        keys |= MK_LBUTTON;
-    }
-    if (GetKeyState(VK_RBUTTON) < 0) {
-        keys |= MK_RBUTTON;
-    }
-    if (GetKeyState(VK_MBUTTON) < 0) {
-        keys |= MK_MBUTTON;
-    }
-    if (GetKeyState(VK_XBUTTON1) < 0) {
-        keys |= MK_XBUTTON1;
-    }
-    if (GetKeyState(VK_XBUTTON2) < 0) {
-        keys |= MK_XBUTTON2;
-    }
-    if (GetKeyState(VK_SHIFT) < 0) {
-        keys |= MK_SHIFT;
-    }
-    if (GetKeyState(VK_CONTROL) < 0) {
-        keys |= MK_CONTROL;
-    }
-    return keys;
-}
-
 static bool IsOwnWindow(HWND hwnd) {
     while (hwnd) {
         wchar_t className[96] = {};
@@ -1251,62 +1225,39 @@ static void FocusLongTarget(LongSessionState *state) {
     SetForegroundWindow(state->targetRoot);
 }
 
-static bool ForwardLongWheel(LongSessionState *state, const MSLLHOOKSTRUCT *mouse) {
-    if (!state || !mouse || state->done || state->cancelled) {
+static bool SendLongScrollStep(LongSessionState *state) {
+    if (!state || !state->target || !IsWindow(state->target)) {
         return false;
     }
-    if (!PointInRect(mouse->pt.x, mouse->pt.y, state->selection)) {
-        return false;
-    }
-
-    DWORD now = GetTickCount();
-    if (state->lastWheelTick && now - state->lastWheelTick < kLongWheelThrottleMs) {
-        return true;
-    }
-    state->lastWheelTick = now;
-
-    HWND target = WindowAtPointForScroll(mouse->pt, state->target);
-    if (!target || !IsWindow(target)) {
-        return false;
-    }
-
-    HWND root = RootWindow(target);
-    if (root && !IsOwnWindow(root)) {
-        state->targetRoot = root;
-    }
+    POINT center = {state->selection.left + state->w / 2, state->selection.top + state->h / 2};
     FocusLongTarget(state);
-
-    int delta = GET_WHEEL_DELTA_WPARAM(mouse->mouseData);
-    int safeDelta = delta < 0 ? -WHEEL_DELTA : WHEEL_DELTA;
-    WPARAM wheelParam = MAKEWPARAM(CurrentMouseKeyState(), static_cast<WORD>(safeDelta));
-    LPARAM pointParam = MAKELPARAM(static_cast<SHORT>(mouse->pt.x), static_cast<SHORT>(mouse->pt.y));
-    PostMessageW(target, WM_MOUSEWHEEL, wheelParam, pointParam);
-    return true;
-}
-
-static LRESULT CALLBACK LongMouseHookProc(int code, WPARAM wParam, LPARAM lParam) {
-    if (code == HC_ACTION && wParam == WM_MOUSEWHEEL && g_longSession) {
-        const MSLLHOOKSTRUCT *mouse = reinterpret_cast<const MSLLHOOKSTRUCT *>(lParam);
-        if (ForwardLongWheel(g_longSession, mouse)) {
-            return 1;
+    SetCursorPos(center.x, center.y);
+    HWND pointTarget = WindowAtPointForScroll(center, state->target);
+    if (pointTarget && IsWindow(pointTarget)) {
+        state->target = pointTarget;
+        HWND root = RootWindow(pointTarget);
+        if (root && !IsOwnWindow(root)) {
+            state->targetRoot = root;
         }
     }
-    return CallNextHookEx(g_longMouseHook, code, wParam, lParam);
+    int notches = std::max(1, (kLongScrollPixels + 119) / 120);
+    INPUT input = {};
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+    input.mi.mouseData = static_cast<DWORD>(-WHEEL_DELTA * notches);
+    return SendInput(1, &input, sizeof(input)) == 1;
 }
 
-static void StartLongMouseHook(LongSessionState *state) {
-    g_longSession = state;
-    if (!g_longMouseHook) {
-        g_longMouseHook = SetWindowsHookExW(WH_MOUSE_LL, LongMouseHookProc, g_instance, 0);
-    }
-}
-
-static void StopLongMouseHook() {
-    if (g_longMouseHook) {
-        UnhookWindowsHookEx(g_longMouseHook);
-        g_longMouseHook = NULL;
-    }
-    g_longSession = NULL;
+static void PumpMessagesFor(HWND hwnd, int milliseconds) {
+    DWORD end = GetTickCount() + static_cast<DWORD>(milliseconds);
+    MSG msg;
+    do {
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(10);
+    } while (GetTickCount() < end && IsWindow(hwnd));
 }
 
 static bool CandidateLongPanelPosition(const RECT &selection, int x, int y, int *outX, int *outY) {
@@ -1437,13 +1388,17 @@ static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
     wchar_t status[128];
     wsprintfW(status, L"Long capture  %d frames  %d px", static_cast<int>(state->frames.size()), state->totalH);
     DrawTextLabel(dc, status, 14, 12, RGB(245, 251, 248));
-    if (state->captureLimitReached) {
-        DrawTextLabel(dc, L"Limit reached. Click Done to finish.", 14, 34, RGB(255, 207, 90));
+    if (!state->started) {
+        DrawTextLabel(dc, L"Preparing automatic scroll capture...", 14, 34, RGB(188, 202, 200));
+    } else if (state->captureLimitReached) {
+        DrawTextLabel(dc, L"Finished or limit reached. Opening editor.", 14, 34, RGB(255, 207, 90));
     } else if (state->skippedFrames > 0) {
-        DrawTextLabel(dc, L"Scroll slower: fast movement was skipped.", 14, 34, RGB(255, 207, 90));
+        DrawTextLabel(dc, L"Waiting for stable overlap...", 14, 34, RGB(255, 207, 90));
+    } else if (!state->statusText.empty()) {
+        DrawTextLabel(dc, state->statusText, 14, 34, RGB(188, 202, 200));
     } else {
         wchar_t hint[128];
-        wsprintfW(hint, L"Scroll slowly, then Done. Last +%d px", state->lastCopyH);
+        wsprintfW(hint, L"Auto scrolling. Last +%d px", state->lastCopyH);
         DrawTextLabel(dc, hint, 14, 34, RGB(188, 202, 200));
     }
 
@@ -1469,7 +1424,7 @@ static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
         FillRectColor(dc, done, RGB(23, 198, 163));
         FillRectColor(dc, cancel, RGB(36, 45, 48));
     }
-    DrawCenteredText(dc, L"Done", done, -14, FW_SEMIBOLD, RGB(7, 11, 14));
+    DrawCenteredText(dc, L"Stop", done, -14, FW_SEMIBOLD, RGB(7, 11, 14));
     DrawCenteredText(dc, L"Cancel", cancel, -14, FW_SEMIBOLD, RGB(245, 251, 248));
 }
 
@@ -1511,25 +1466,12 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
         CREATESTRUCTW *create = reinterpret_cast<CREATESTRUCTW *>(lParam);
         state = reinterpret_cast<LongSessionState *>(create->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-        SetTimer(hwnd, 1, kLongCapturePollMs, NULL);
         return 0;
     }
     case WM_ERASEBKGND:
         return 1;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
-    case WM_TIMER:
-        if (state) {
-            if (SampleLongSelection(state)) {
-                InvalidateRect(hwnd, NULL, FALSE);
-            }
-            if (state->totalH >= kLongCaptureMaxHeight ||
-                static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
-                state->captureLimitReached = true;
-                InvalidateRect(hwnd, NULL, FALSE);
-            }
-        }
-        return 0;
     case WM_COMMAND:
         if (LOWORD(wParam) == kLongSessionDone && state) {
             state->done = true;
@@ -1545,8 +1487,6 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
         break;
     case WM_KEYDOWN:
         if (wParam == VK_RETURN && state) {
-            Sleep(80);
-            SampleLongSelection(state);
             state->done = true;
             DestroyWindow(hwnd);
             return 0;
@@ -1558,17 +1498,6 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
             return 0;
         }
         break;
-    case WM_MOUSEWHEEL:
-        if (state) {
-            POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            MSLLHOOKSTRUCT mouse = {};
-            mouse.pt = point;
-            mouse.mouseData = MAKELONG(0, static_cast<WORD>(GET_WHEEL_DELTA_WPARAM(wParam)));
-            if (ForwardLongWheel(state, &mouse)) {
-                return 0;
-            }
-        }
-        break;
     case WM_LBUTTONDOWN:
         if (state) {
             int x = GET_X_LPARAM(lParam);
@@ -1576,8 +1505,6 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
             RECT done = LongDoneRect();
             RECT cancel = LongCancelRect();
             if (PointInRect(x, y, done)) {
-                Sleep(80);
-                SampleLongSelection(state);
                 state->done = true;
                 DestroyWindow(hwnd);
             } else if (PointInRect(x, y, cancel)) {
@@ -1605,7 +1532,6 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
-        KillTimer(hwnd, 1);
         return 0;
     }
 
@@ -1647,18 +1573,59 @@ static HBITMAP RunLongSession(const RECT &selection, HWND preferredTarget, int *
         return NULL;
     }
 
-    StartLongMouseHook(&state);
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     UpdateWindow(hwnd);
     FocusLongTarget(&state);
     SetCursorPos(center.x, center.y);
 
-    MSG msg;
-    while (!state.done && GetMessageW(&msg, NULL, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    state.started = true;
+    state.statusText = L"Auto scrolling...";
+    InvalidateRect(hwnd, NULL, FALSE);
+    PumpMessagesFor(hwnd, 120);
+
+    while (!state.done && !state.cancelled && IsWindow(hwnd)) {
+        if (state.totalH >= kLongCaptureMaxHeight ||
+            static_cast<int>(state.frames.size()) >= kLongCaptureMaxFrames) {
+            state.captureLimitReached = true;
+            state.statusText = L"Limit reached.";
+            InvalidateRect(hwnd, NULL, FALSE);
+            break;
+        }
+
+        if (!SendLongScrollStep(&state)) {
+            state.statusText = L"Target did not accept scrolling.";
+            InvalidateRect(hwnd, NULL, FALSE);
+            PumpMessagesFor(hwnd, 400);
+            break;
+        }
+
+        PumpMessagesFor(hwnd, kLongScrollWaitMs);
+        if (state.done || state.cancelled || !IsWindow(hwnd)) {
+            break;
+        }
+
+        bool added = SampleLongSelection(&state);
+        if (added) {
+            state.unchangedSteps = 0;
+            state.statusText = L"Auto scrolling...";
+            InvalidateRect(hwnd, NULL, FALSE);
+        } else {
+            ++state.unchangedSteps;
+            state.statusText = L"Checking for page bottom...";
+            InvalidateRect(hwnd, NULL, FALSE);
+            if (state.unchangedSteps >= 3) {
+                state.captureLimitReached = true;
+                state.statusText = L"Bottom reached.";
+                InvalidateRect(hwnd, NULL, FALSE);
+                PumpMessagesFor(hwnd, 350);
+                break;
+            }
+        }
     }
-    StopLongMouseHook();
+
+    if (IsWindow(hwnd)) {
+        DestroyWindow(hwnd);
+    }
 
     HBITMAP stitched = NULL;
     if (!state.cancelled) {
