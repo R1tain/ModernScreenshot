@@ -1,10 +1,7 @@
 use windows::{
-    core::*,
-    Win32::Foundation::*,
     Win32::Graphics::Gdi::*,
     Win32::UI::WindowsAndMessaging::*,
 };
-use std::ptr;
 
 pub struct Screenshot {
     pub width: i32,
@@ -14,7 +11,7 @@ pub struct Screenshot {
 }
 
 impl Screenshot {
-    pub unsafe fn capture() -> Result<Self> {
+    pub unsafe fn capture() -> Result<Self, Box<dyn std::error::Error>> {
         // 获取屏幕 DC
         let screen_dc = GetDC(None);
 
@@ -26,7 +23,7 @@ impl Screenshot {
         let mem_dc = CreateCompatibleDC(screen_dc);
 
         // 创建位图
-        let hbitmap = CreateCompatibleBitmap(screen_dc, width, height)?;
+        let hbitmap = CreateCompatibleBitmap(screen_dc, width, height);
 
         // 选择位图到内存 DC
         SelectObject(mem_dc, hbitmap);
@@ -39,7 +36,7 @@ impl Screenshot {
             screen_dc,
             0, 0,
             SRCCOPY,
-        )?;
+        );
 
         // 释放屏幕 DC
         ReleaseDC(None, screen_dc);
@@ -52,14 +49,14 @@ impl Screenshot {
         })
     }
 
-    pub unsafe fn draw_to(&self, target_dc: HDC, x: i32, y: i32, w: i32, h: i32) -> Result<()> {
+    pub unsafe fn draw_to(&self, target_dc: HDC, x: i32, y: i32, w: i32, h: i32) -> Result<(), Box<dyn std::error::Error>> {
         BitBlt(
             target_dc,
             x, y, w, h,
             self.hdc,
             x, y,
             SRCCOPY,
-        )?;
+        );
         Ok(())
     }
 }

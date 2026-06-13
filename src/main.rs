@@ -1,7 +1,6 @@
 use windows::{
     core::*,
     Win32::Foundation::*,
-    Win32::Graphics::Gdi::*,
     Win32::UI::WindowsAndMessaging::*,
     Win32::UI::Input::KeyboardAndMouse::*,
     Win32::System::LibraryLoader::GetModuleHandleW,
@@ -13,6 +12,7 @@ mod capture_window;
 mod drawing;
 mod toolbar;
 mod save;
+mod keys;
 
 use capture_window::CaptureWindow;
 
@@ -85,7 +85,9 @@ impl App {
         let tip_wide: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
         tray_icon.szTip[..tip_wide.len()].copy_from_slice(&tip_wide);
 
-        unsafe { Shell_NotifyIconW(NIM_ADD, &tray_icon)? };
+        unsafe {
+            Shell_NotifyIconW(NIM_ADD, &tray_icon).ok();
+        };
 
         Ok(Self { hwnd, tray_icon })
     }

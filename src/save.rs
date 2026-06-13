@@ -4,6 +4,7 @@ use windows::{
     Win32::Graphics::Gdi::*,
     Win32::UI::WindowsAndMessaging::*,
     Win32::Storage::FileSystem::*,
+    Win32::System::DataExchange::*,
 };
 
 pub unsafe fn save_bitmap_to_file(hdc: HDC, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
@@ -18,11 +19,11 @@ pub unsafe fn save_bitmap_to_file(hdc: HDC, x: i32, y: i32, width: i32, height: 
 
     // 创建位图
     let mem_dc = CreateCompatibleDC(hdc);
-    let hbitmap = CreateCompatibleBitmap(hdc, width, height)?;
+    let hbitmap = CreateCompatibleBitmap(hdc, width, height);
     SelectObject(mem_dc, hbitmap);
 
     // 复制区域
-    BitBlt(mem_dc, 0, 0, width, height, hdc, x, y, SRCCOPY)?;
+    BitBlt(mem_dc, 0, 0, width, height, hdc, x, y, SRCCOPY);
 
     // 保存为 BMP
     save_bitmap_as_bmp(&filename_wide, hbitmap, width, height)?;
@@ -34,7 +35,7 @@ pub unsafe fn save_bitmap_to_file(hdc: HDC, x: i32, y: i32, width: i32, height: 
     let msg_wide: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
 
     MessageBoxW(
-        HWND(0),
+        HWND(std::ptr::null_mut()),
         PCWSTR(msg_wide.as_ptr()),
         w!("保存成功"),
         MB_OK | MB_ICONINFORMATION,
@@ -49,7 +50,7 @@ unsafe fn save_bitmap_as_bmp(filename: &[u16], hbitmap: HBITMAP, width: i32, hei
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width,
-            biHeight: -height, // 负数表示从上到下
+            biHeight: -height,
             biPlanes: 1,
             biBitCount: 24,
             biCompression: BI_RGB.0 as u32,
@@ -76,13 +77,10 @@ unsafe fn save_bitmap_as_bmp(filename: &[u16], hbitmap: HBITMAP, width: i32, hei
     let file_size = 54 + image_size;
     let mut file_header = [0u8; 54];
 
-    // BITMAPFILEHEADER
     file_header[0] = b'B';
     file_header[1] = b'M';
     file_header[2..6].copy_from_slice(&(file_size as u32).to_le_bytes());
     file_header[10..14].copy_from_slice(&54u32.to_le_bytes());
-
-    // BITMAPINFOHEADER
     file_header[14..18].copy_from_slice(&40u32.to_le_bytes());
     file_header[18..22].copy_from_slice(&(width as u32).to_le_bytes());
     file_header[22..26].copy_from_slice(&(height as u32).to_le_bytes());
@@ -117,11 +115,11 @@ pub unsafe fn copy_bitmap_to_clipboard(hwnd: HWND, hdc: HDC, x: i32, y: i32, wid
 
     // 创建位图
     let mem_dc = CreateCompatibleDC(hdc);
-    let hbitmap = CreateCompatibleBitmap(hdc, width, height)?;
+    let hbitmap = CreateCompatibleBitmap(hdc, width, height);
     SelectObject(mem_dc, hbitmap);
 
     // 复制区域
-    BitBlt(mem_dc, 0, 0, width, height, hdc, x, y, SRCCOPY)?;
+    BitBlt(mem_dc, 0, 0, width, height, hdc, x, y, SRCCOPY);
 
     // 设置到剪贴板
     SetClipboardData(CF_BITMAP.0 as u32, HANDLE(hbitmap.0))?;

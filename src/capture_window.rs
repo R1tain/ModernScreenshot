@@ -9,6 +9,7 @@ use crate::capture::Screenshot;
 use crate::toolbar::Toolbar;
 use crate::drawing::{ToolMode, DrawAction};
 use crate::save::{save_bitmap_to_file, copy_bitmap_to_clipboard};
+use crate::keys::VK_ESCAPE;
 
 const CAPTURE_CLASS: PCWSTR = w!("CaptureWindowClass");
 
@@ -52,7 +53,7 @@ impl CaptureWindow {
         RegisterClassW(&wc);
 
         Ok(Self {
-            hwnd: HWND(0),
+            hwnd: HWND(std::ptr::null_mut()),
             screenshot: None,
             selecting: false,
             selected: false,
@@ -75,7 +76,7 @@ impl CaptureWindow {
 
     pub unsafe fn show(&mut self) -> Result<()> {
         // 捕获截图
-        self.screenshot = Some(Screenshot::capture()?);
+        self.screenshot = Some(Screenshot::capture().expect("Screenshot capture failed"));
 
         let screen_width = GetSystemMetrics(SM_CXSCREEN);
         let screen_height = GetSystemMetrics(SM_CYSCREEN);
@@ -103,7 +104,7 @@ impl CaptureWindow {
         CAPTURE_WINDOW = Some(self as *mut CaptureWindow);
 
         ShowWindow(self.hwnd, SW_SHOW);
-        UpdateWindow(self.hwnd)?;
+        UpdateWindow(self.hwnd);
 
         Ok(())
     }
@@ -250,7 +251,7 @@ impl CaptureWindow {
     unsafe fn close(&mut self) {
         if !self.hwnd.is_invalid() {
             DestroyWindow(self.hwnd);
-            self.hwnd = HWND(0);
+            self.hwnd = HWND(std::ptr::null_mut());
         }
         self.screenshot = None;
         self.toolbar = None;
