@@ -8,10 +8,11 @@
 
 ## ✨ 主要特性
 
-- 🚀 **轻量快速** - 最小内存占用，启动迅速
-- 🎨 **丰富工具** - 矩形、箭头、画笔、文字、马赛克
+- 🚀 **轻量快速** - 仅 200KB 左右，启动迅速
+- 🎨 **现代化 UI** - Pixpin 风格毛玻璃工具栏
+- 🔧 **丰富工具** - 矩形、箭头、画笔、文字、马赛克
 - 📋 **多种输出** - 复制到剪贴板、保存文件、钉在屏幕
-- ⌨️ **快捷键** - F1 一键截图
+- ⌨️ **快捷键** - Ctrl+1 一键截图
 - 💾 **路径管理** - 所有数据保存在安装目录，默认 D 盘
 - 🔄 **撤销重做** - Ctrl+Z / Ctrl+Y
 - 🖱️ **多屏支持** - 完美支持多显示器
@@ -20,20 +21,22 @@
 
 前往 [Releases](https://github.com/R1tain/ModernScreenshot/releases) 下载最新版本：
 
-| 文件 | 说明 | 大小 |
-|------|------|------|
-| `ModernScreenshot_Setup_x.x.x.exe` | 安装程序（推荐） | ~5 MB |
-| `ModernScreenshot_Portable_x.x.x.zip` | 绿色便携版（需 .NET 8.0） | ~1 MB |
-| `ModernScreenshot_Portable_Full_x.x.x.zip` | 完整便携版（含运行时） | ~70 MB |
+| 文件 | 说明 | 大小 | 推荐 |
+|------|------|------|------|
+| `ModernScreenshot_Portable_x.x.x.zip` | 绿色便携版（需 .NET 8.0） | ~200 KB | ⭐ 推荐 |
+| `ModernScreenshot_Setup_x.x.x.exe` | 安装程序 | ~5 MB | - |
+| `ModernScreenshot_Portable_Full_x.x.x.zip` | 完整便携版（含运行时） | ~65 MB | - |
+
+**推荐使用绿色便携版**，只需要系统安装了 .NET 8.0 运行时（大多数 Windows 系统已自带）。
 
 ### 系统要求
 - Windows 10/11 (x64)
-- .NET 8.0 Desktop Runtime（安装程序版本会自动处理）
+- .NET 8.0 Desktop Runtime（绿色版需要，[点击下载](https://dotnet.microsoft.com/download/dotnet/8.0)）
 
 ## 📖 使用说明
 
 ### 快捷键
-- `F1` - 启动截图
+- `Ctrl+1` - 启动截图
 - `Esc` - 取消截图
 - `Ctrl+C` - 复制到剪贴板
 - `Ctrl+S` - 保存到文件

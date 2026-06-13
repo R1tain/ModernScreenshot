@@ -47,13 +47,13 @@ jobs:
     - name: Build
       run: dotnet build --configuration Release --no-restore
 
-    - name: Publish Self-Contained
+    - name: Publish Self-Contained (Trimmed)
       run: |
-        dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -p:Version=${{ steps.version.outputs.VERSION }} -o publish/self-contained
+        dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:PublishTrimmed=true /p:TrimMode=full /p:EnableCompressionInSingleFile=true /p:DebugType=none /p:DebugSymbols=false /p:InvariantGlobalization=true /p:IlcOptimizationPreference=Size /p:Version=${{ steps.version.outputs.VERSION }} -o publish/self-contained
 
-    - name: Publish Framework-Dependent
+    - name: Publish Framework-Dependent (Minimal)
       run: |
-        dotnet publish -c Release -r win-x64 --self-contained false -p:Version=${{ steps.version.outputs.VERSION }} -o publish/framework-dependent
+        dotnet publish -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true /p:EnableCompressionInSingleFile=true /p:DebugType=none /p:DebugSymbols=false /p:Version=${{ steps.version.outputs.VERSION }} -o publish/framework-dependent
 
     - name: Install Inno Setup
       run: choco install innosetup -y
@@ -65,7 +65,7 @@ jobs:
         $content = Get-Content setup.iss -Raw
         $content = $content -replace 'AppVersion=.*', "AppVersion=$version"
         $content = $content -replace 'OutputBaseFilename=.*', "OutputBaseFilename=ModernScreenshot_Setup_$version"
-        $content = $content -replace 'Source:.*publish.*', "Source: `"publish\self-contained\*`"; DestDir: `"{app}`"; Flags: ignoreversion recursesubdirs createallsubdirs"
+        $content = $content -replace 'Source:.*publish.*', "Source: `"publish\self-contained\ModernScreenshot.exe`"; DestDir: `"{app}`"; Flags: ignoreversion"
         $content | Set-Content setup.iss
 
     - name: Build EXE Installer with Inno Setup
@@ -77,13 +77,13 @@ jobs:
       shell: pwsh
       run: |
         $version = "${{ steps.version.outputs.VERSION }}"
-        Compress-Archive -Path "publish/self-contained/*" -DestinationPath "ModernScreenshot_Portable_Full_$version.zip"
+        Compress-Archive -Path "publish/self-contained/ModernScreenshot.exe" -DestinationPath "ModernScreenshot_Portable_Full_$version.zip"
 
     - name: Create Portable ZIP (Framework-Dependent)
       shell: pwsh
       run: |
         $version = "${{ steps.version.outputs.VERSION }}"
-        Compress-Archive -Path "publish/framework-dependent/*" -DestinationPath "ModernScreenshot_Portable_$version.zip"
+        Compress-Archive -Path "publish/framework-dependent/ModernScreenshot.exe" -DestinationPath "ModernScreenshot_Portable_$version.zip"
 
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
