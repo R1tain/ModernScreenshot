@@ -62,8 +62,9 @@ static const int kButtonH = 46;
 static const int kButtonGap = 8;
 static const int kEditorMargin = 80;
 static const int kLongCaptureMaxFrames = 256;
-static const int kLongCaptureMaxHeight = 20000;
-static const int kLongCapturePollMs = 180;
+static const int kLongCaptureMaxHeight = 60000;
+static const int kLongCapturePollMs = 90;
+static const int kLongWheelThrottleMs = 120;
 static const int kLongSessionW = 360;
 static const int kLongSessionH = 520;
 static const int kSettingsApply = 3001;
@@ -150,6 +151,10 @@ struct LongSessionState {
     int w = 0;
     int h = 0;
     int totalH = 0;
+    int skippedFrames = 0;
+    int lastCopyH = 0;
+    bool captureLimitReached = false;
+    DWORD lastWheelTick = 0;
     HWND target = NULL;
     HWND targetRoot = NULL;
     std::vector<LongFrame> frames;
@@ -724,14 +729,17 @@ static int OverlapError(const std::vector<BYTE> &prev, const std::vector<BYTE> &
     return samples > 0 ? static_cast<int>(diff / samples) : 255;
 }
 
-static int EstimateOverlap(const std::vector<BYTE> &prev, const std::vector<BYTE> &next, int w, int h) {
+static int EstimateOverlap(const std::vector<BYTE> &prev, const std::vector<BYTE> &next, int w, int h, int *outError) {
     if (w <= 0 || h <= 1) {
+        if (outError) {
+            *outError = 255 * 3;
+        }
         return 0;
     }
 
-    int minOverlap = std::min(h - 1, std::max(24, h / 8));
-    int maxOverlap = std::min(h - 1, std::max(minOverlap, h * 9 / 10));
-    int step = std::max(1, h / 80);
+    int minOverlap = std::min(h - 1, std::max(48, h / 6));
+    int maxOverlap = std::min(h - 1, std::max(minOverlap, h * 19 / 20));
+    int step = std::max(1, h / 120);
     int bestOverlap = minOverlap;
     int bestError = 255 * 3;
 
@@ -753,7 +761,10 @@ static int EstimateOverlap(const std::vector<BYTE> &prev, const std::vector<BYTE
         }
     }
 
-    return bestError <= 45 ? bestOverlap : 0;
+    if (outError) {
+        *outError = bestError;
+    }
+    return bestError <= 34 ? bestOverlap : 0;
 }
 
 static HBITMAP StitchLongFrames(const std::vector<LongFrame> &frames, int w, int *outH) {
@@ -1122,6 +1133,7 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
         state->frames.push_back({bitmap, state->h});
         state->prevPixels.swap(*pixels);
         state->totalH = state->h;
+        state->lastCopyH = state->h;
         state->hasPrev = true;
         return true;
     }
@@ -1131,10 +1143,20 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
         return false;
     }
 
-    int overlap = EstimateOverlap(state->prevPixels, *pixels, state->w, state->h);
+    int overlapError = 255 * 3;
+    int overlap = EstimateOverlap(state->prevPixels, *pixels, state->w, state->h, &overlapError);
+    if (overlap <= 0) {
+        ++state->skippedFrames;
+        DeleteObject(bitmap);
+        return false;
+    }
     int copyH = state->h - overlap;
     if (copyH < 6 || state->totalH >= kLongCaptureMaxHeight ||
         static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
+        if (state->totalH >= kLongCaptureMaxHeight ||
+            static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
+            state->captureLimitReached = true;
+        }
         DeleteObject(bitmap);
         return false;
     }
@@ -1153,6 +1175,8 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
     }
     state->frames.push_back({strip, copyH});
     state->totalH += copyH;
+    state->lastCopyH = copyH;
+    state->skippedFrames = 0;
     state->prevPixels.swap(*pixels);
     return true;
 }
@@ -1235,6 +1259,12 @@ static bool ForwardLongWheel(LongSessionState *state, const MSLLHOOKSTRUCT *mous
         return false;
     }
 
+    DWORD now = GetTickCount();
+    if (state->lastWheelTick && now - state->lastWheelTick < kLongWheelThrottleMs) {
+        return true;
+    }
+    state->lastWheelTick = now;
+
     HWND target = WindowAtPointForScroll(mouse->pt, state->target);
     if (!target || !IsWindow(target)) {
         return false;
@@ -1247,7 +1277,8 @@ static bool ForwardLongWheel(LongSessionState *state, const MSLLHOOKSTRUCT *mous
     FocusLongTarget(state);
 
     int delta = GET_WHEEL_DELTA_WPARAM(mouse->mouseData);
-    WPARAM wheelParam = MAKEWPARAM(CurrentMouseKeyState(), static_cast<WORD>(delta));
+    int safeDelta = delta < 0 ? -WHEEL_DELTA : WHEEL_DELTA;
+    WPARAM wheelParam = MAKEWPARAM(CurrentMouseKeyState(), static_cast<WORD>(safeDelta));
     LPARAM pointParam = MAKELPARAM(static_cast<SHORT>(mouse->pt.x), static_cast<SHORT>(mouse->pt.y));
     PostMessageW(target, WM_MOUSEWHEEL, wheelParam, pointParam);
     return true;
@@ -1406,7 +1437,15 @@ static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
     wchar_t status[128];
     wsprintfW(status, L"Long capture  %d frames  %d px", static_cast<int>(state->frames.size()), state->totalH);
     DrawTextLabel(dc, status, 14, 12, RGB(245, 251, 248));
-    DrawTextLabel(dc, L"Scroll the page, then click Done.", 14, 34, RGB(188, 202, 200));
+    if (state->captureLimitReached) {
+        DrawTextLabel(dc, L"Limit reached. Click Done to finish.", 14, 34, RGB(255, 207, 90));
+    } else if (state->skippedFrames > 0) {
+        DrawTextLabel(dc, L"Scroll slower: fast movement was skipped.", 14, 34, RGB(255, 207, 90));
+    } else {
+        wchar_t hint[128];
+        wsprintfW(hint, L"Scroll slowly, then Done. Last +%d px", state->lastCopyH);
+        DrawTextLabel(dc, hint, 14, 34, RGB(188, 202, 200));
+    }
 
     RECT preview = {14, 62, 346, 458};
     DrawLongPreview(state, dc, preview);
@@ -1486,8 +1525,8 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
             }
             if (state->totalH >= kLongCaptureMaxHeight ||
                 static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
-                state->done = true;
-                DestroyWindow(hwnd);
+                state->captureLimitReached = true;
+                InvalidateRect(hwnd, NULL, FALSE);
             }
         }
         return 0;
