@@ -15,7 +15,6 @@ namespace ModernScreenshot
         private Point currentPoint;
         private bool isSelecting;
         private bool isSelected;
-        private ToolStripButton? currentToolButton;
 
         private Panel? toolbarPanel;
         private ToolMode currentTool = ToolMode.None;
@@ -411,158 +410,128 @@ namespace ModernScreenshot
         {
             if (toolbarPanel != null) return;
 
-            toolbarPanel = new Panel
+            // 使用现代化毛玻璃工具栏
+            var modernToolbar = new ModernToolbar
             {
-                BackColor = Color.FromArgb(240, 50, 50, 50),
-                Size = new Size(400, 50),
-                Location = new Point(selectionRect.X, selectionRect.Bottom + 5)
+                Size = new Size(720, 60),
+                Location = new Point(selectionRect.X, selectionRect.Bottom + 10)
             };
 
             // 确保工具栏在屏幕内
-            if (toolbarPanel.Bottom > this.Height)
+            if (modernToolbar.Bottom > this.Height)
             {
-                toolbarPanel.Location = new Point(selectionRect.X, selectionRect.Y - 55);
+                modernToolbar.Location = new Point(selectionRect.X, selectionRect.Y - 70);
+            }
+            if (modernToolbar.Right > this.Width)
+            {
+                modernToolbar.Location = new Point(this.Width - modernToolbar.Width - 10, modernToolbar.Y);
             }
 
-            var toolbar = new ToolStrip
-            {
-                BackColor = Color.Transparent,
-                Renderer = new ToolStripProfessionalRenderer(new DarkColorTable()),
-                GripStyle = ToolStripGripStyle.Hidden,
-                Dock = DockStyle.Fill
-            };
+            int x = 15;
+            int spacing = 10;
 
-            AddToolButton(toolbar, "矩形", ToolMode.Rectangle);
-            AddToolButton(toolbar, "箭头", ToolMode.Arrow);
-            AddToolButton(toolbar, "画笔", ToolMode.Pen);
-            AddToolButton(toolbar, "文字", ToolMode.Text);
-            AddToolButton(toolbar, "马赛克", ToolMode.Mosaic);
+            // 工具按钮
+            AddModernToolButton(modernToolbar, "□", "矩形", ref x, spacing, ToolMode.Rectangle);
+            AddModernToolButton(modernToolbar, "→", "箭头", ref x, spacing, ToolMode.Arrow);
+            AddModernToolButton(modernToolbar, "✎", "画笔", ref x, spacing, ToolMode.Pen);
+            AddModernToolButton(modernToolbar, "A", "文字", ref x, spacing, ToolMode.Text);
+            AddModernToolButton(modernToolbar, "⊞", "马赛克", ref x, spacing, ToolMode.Mosaic);
 
-            toolbar.Items.Add(new ToolStripSeparator());
+            x += 5;
 
-            // 颜色选择
-            var colorBtn = new ToolStripDropDownButton("颜色");
-            colorBtn.BackColor = drawColor;
-            colorBtn.ForeColor = GetContrastColor(drawColor);
-            AddColorOptions(colorBtn, (color) =>
-            {
-                drawColor = color;
-                colorBtn.BackColor = color;
-                colorBtn.ForeColor = GetContrastColor(color);
-            });
-            toolbar.Items.Add(colorBtn);
-
-            // 线宽选择
-            var widthBtn = new ToolStripDropDownButton($"线宽 {drawWidth}");
-            AddWidthOptions(widthBtn, (width) =>
-            {
-                drawWidth = width;
-                widthBtn.Text = $"线宽 {width}";
-            });
-            toolbar.Items.Add(widthBtn);
-
-            toolbar.Items.Add(new ToolStripSeparator());
-
-            var undoBtn = new ToolStripButton("撤销");
+            // 撤销/重做
+            var undoBtn = CreateModernButton("↶", "撤销", x, 10, false);
             undoBtn.Click += (s, e) => Undo();
-            toolbar.Items.Add(undoBtn);
+            modernToolbar.Controls.Add(undoBtn);
+            x += undoBtn.Width + spacing;
 
-            var redoBtn = new ToolStripButton("重做");
+            var redoBtn = CreateModernButton("↷", "重做", x, 10, false);
             redoBtn.Click += (s, e) => Redo();
-            toolbar.Items.Add(redoBtn);
+            modernToolbar.Controls.Add(redoBtn);
+            x += redoBtn.Width + spacing + 5;
 
-            toolbar.Items.Add(new ToolStripSeparator());
-
-            var saveBtn = new ToolStripButton("保存");
+            // 保存按钮 - 突出显示
+            var saveBtn = CreateModernButton("💾", "保存", x, 10, true);
+            saveBtn.Size = new Size(100, 40);
+            saveBtn.IsPrimary = true;
             saveBtn.Click += (s, e) => SaveToFile();
-            toolbar.Items.Add(saveBtn);
+            modernToolbar.Controls.Add(saveBtn);
+            x += saveBtn.Width + spacing;
 
-            var copyBtn = new ToolStripButton("复制");
+            // 复制按钮
+            var copyBtn = CreateModernButton("📋", "复制", x, 10, false);
+            copyBtn.Size = new Size(90, 40);
             copyBtn.Click += (s, e) => CopyToClipboard();
-            toolbar.Items.Add(copyBtn);
+            modernToolbar.Controls.Add(copyBtn);
+            x += copyBtn.Width + spacing;
 
-            var pinBtn = new ToolStripButton("钉图");
+            // 钉图按钮
+            var pinBtn = CreateModernButton("📌", "钉图", x, 10, false);
             pinBtn.Click += (s, e) => PinImage();
-            toolbar.Items.Add(pinBtn);
+            modernToolbar.Controls.Add(pinBtn);
+            x += pinBtn.Width + spacing;
 
-            var cancelBtn = new ToolStripButton("取消");
+            // 取消按钮
+            var cancelBtn = CreateModernButton("✕", "取消", x, 10, false);
             cancelBtn.Click += (s, e) => this.Close();
-            toolbar.Items.Add(cancelBtn);
+            modernToolbar.Controls.Add(cancelBtn);
 
-            toolbarPanel.Controls.Add(toolbar);
+            toolbarPanel = modernToolbar;
             this.Controls.Add(toolbarPanel);
             toolbarPanel.BringToFront();
         }
 
-        private void AddToolButton(ToolStrip toolbar, string text, ToolMode mode)
+        private ModernButton CreateModernButton(string icon, string text, int x, int y, bool showIcon)
         {
-            var btn = new ToolStripButton(text);
-            btn.CheckOnClick = true;
+            var btn = new ModernButton
+            {
+                Location = new Point(x, y),
+                Size = new Size(80, 40),
+                Text = text,
+                IconText = showIcon ? icon : "",
+                Font = new Font("Segoe UI", 9F, FontStyle.Regular)
+            };
+            return btn;
+        }
+
+        private void AddModernToolButton(ModernToolbar toolbar, string icon, string text, ref int x, int spacing, ToolMode mode)
+        {
+            var btn = new ModernButton
+            {
+                Location = new Point(x, 10),
+                Size = new Size(70, 40),
+                Text = text,
+                IconText = icon,
+                Tag = mode
+            };
+
             btn.Click += (s, e) =>
             {
-                if (currentToolButton != null && currentToolButton != btn)
+                // 取消其他工具按钮
+                foreach (Control ctrl in toolbar.Controls)
                 {
-                    currentToolButton.Checked = false;
-                }
-                currentToolButton = btn.Checked ? btn : null;
-                currentTool = btn.Checked ? mode : ToolMode.None;
-                this.Cursor = btn.Checked ? Cursors.Cross : Cursors.Default;
-            };
-            toolbar.Items.Add(btn);
-        }
-
-        private void AddColorOptions(ToolStripDropDownButton colorBtn, Action<Color> onColorSelected)
-        {
-            var colors = new[]
-            {
-                (Color.Red, "红色"),
-                (Color.Orange, "橙色"),
-                (Color.Yellow, "黄色"),
-                (Color.LimeGreen, "绿色"),
-                (Color.DodgerBlue, "蓝色"),
-                (Color.Purple, "紫色"),
-                (Color.Black, "黑色"),
-                (Color.White, "白色")
-            };
-
-            foreach (var (color, name) in colors)
-            {
-                var item = new ToolStripMenuItem(name)
-                {
-                    BackColor = color,
-                    ForeColor = GetContrastColor(color)
-                };
-                item.Click += (s, e) => onColorSelected(color);
-                colorBtn.DropDownItems.Add(item);
-            }
-
-            // 自定义颜色
-            var customItem = new ToolStripMenuItem("自定义...");
-            customItem.Click += (s, e) =>
-            {
-                using (var colorDialog = new ColorDialog())
-                {
-                    colorDialog.Color = drawColor;
-                    if (colorDialog.ShowDialog() == DialogResult.OK)
+                    if (ctrl is ModernButton mb && mb != btn && mb.Tag is ToolMode)
                     {
-                        onColorSelected(colorDialog.Color);
+                        mb.BackColor = Color.Transparent;
                     }
                 }
+
+                if (currentTool == mode)
+                {
+                    currentTool = ToolMode.None;
+                    btn.BackColor = Color.Transparent;
+                    this.Cursor = Cursors.Default;
+                }
+                else
+                {
+                    currentTool = mode;
+                    btn.BackColor = Color.FromArgb(100, 0, 120, 215);
+                    this.Cursor = Cursors.Cross;
+                }
             };
-            colorBtn.DropDownItems.Add(new ToolStripSeparator());
-            colorBtn.DropDownItems.Add(customItem);
-        }
 
-        private void AddWidthOptions(ToolStripDropDownButton widthBtn, Action<int> onWidthSelected)
-        {
-            var widths = new[] { 1, 2, 3, 5, 8, 10 };
-
-            foreach (var width in widths)
-            {
-                var item = new ToolStripMenuItem($"{width} 像素");
-                item.Click += (s, e) => onWidthSelected(width);
-                widthBtn.DropDownItems.Add(item);
-            }
+            toolbar.Controls.Add(btn);
+            x += btn.Width + spacing;
         }
 
         private Color GetContrastColor(Color color)

@@ -16,14 +16,14 @@ namespace ModernScreenshot
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
         private const int HOTKEY_ID = 1;
-        private const uint MOD_NONE = 0x0000;
-        private const uint VK_F1 = 0x70;
+        private const uint MOD_CONTROL = 0x0002;
+        private const uint VK_1 = 0x31;
 
         public MainForm()
         {
             InitializeComponent();
             InitializeTrayIcon();
-            RegisterHotKey(this.Handle, HOTKEY_ID, MOD_NONE, VK_F1);
+            RegisterHotKey(this.Handle, HOTKEY_ID, MOD_CONTROL, VK_1);
 
             // 隐藏主窗体
             this.WindowState = FormWindowState.Minimized;
@@ -35,7 +35,7 @@ namespace ModernScreenshot
         {
             trayIcon = new NotifyIcon
             {
-                Text = "现代截图工具 (F1)",
+                Text = "ModernScreenshot (Ctrl+1)",
                 Visible = true
             };
 
