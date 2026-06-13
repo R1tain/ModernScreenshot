@@ -5,7 +5,7 @@ use windows::{
     Win32::UI::WindowsAndMessaging::*,
     Win32::Storage::FileSystem::*,
     Win32::System::DataExchange::*,
-    Win32::System::SystemServices::*,
+    Win32::System::IO::*,
 };
 
 pub unsafe fn save_bitmap_to_file(hdc: HDC, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
