@@ -4,6 +4,10 @@ version = "1.0.0"
 edition = "2021"
 authors = ["R1tain"]
 
+[[bin]]
+name = "modernscreenshot"
+path = "src/main.rs"
+
 [dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
