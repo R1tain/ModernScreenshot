@@ -1192,7 +1192,7 @@ static bool AppendPendingLongTail(LongSessionState *state) {
     }
     int overlapError = 255 * 3;
     int overlap = EstimateOverlap(state->prevPixels, state->pendingPixels, state->w, state->h, &overlapError);
-    if (overlap <= 0 || overlap < state->h - std::max(96, state->h / 6)) {
+    if (overlap <= 0 || overlap >= state->h) {
         return false;
     }
 
@@ -1238,8 +1238,12 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
     if (overlap <= 0) {
         if (AverageFrameDiff(state->prevPixels, *pixels, state->w, state->h) <= 1) {
             state->lastSampleUnchanged = true;
-        } else if (state->pendingBitmap && IsSameFramePixels(state->pendingPixels, *pixels)) {
+        } else if (state->pendingBitmap && AverageFrameDiff(state->pendingPixels, *pixels, state->w, state->h) <= 2) {
             ++state->pendingStableFrames;
+            DeleteObject(state->pendingBitmap);
+            state->pendingBitmap = bitmap;
+            state->pendingPixels.swap(*pixels);
+            return false;
         } else {
             ClearPendingLongFrame(state);
             state->pendingBitmap = bitmap;
@@ -1774,6 +1778,12 @@ static HBITMAP RunLongSession(const RECT &selection, HWND preferredTarget, int *
                     continue;
                 }
                 if (state.pendingStableFrames >= 2 && AppendPendingLongTail(&state)) {
+                    state.unchangedSteps = 0;
+                    state.statusText = L"Added final tail.";
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    continue;
+                }
+                if (state.pendingStableFrames >= 1 && AppendPendingLongTail(&state)) {
                     state.unchangedSteps = 0;
                     state.statusText = L"Added final tail.";
                     InvalidateRect(hwnd, NULL, FALSE);
