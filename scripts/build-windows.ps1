@@ -45,6 +45,9 @@ if ($Configuration -eq "Release") {
 }
 
 & cl.exe @CompileArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "cl.exe failed with exit code $LASTEXITCODE"
+}
 
 Remove-Item -Recurse -Force $PackageDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
