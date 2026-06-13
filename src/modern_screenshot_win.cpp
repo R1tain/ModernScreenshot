@@ -209,6 +209,10 @@ static HICON g_trayIcon = NULL;
 static Settings g_settings;
 static bool g_hotkeyRegistered = false;
 static bool g_captureActive = false;
+static HANDLE g_singleInstanceMutex = NULL;
+static const wchar_t *kSingleInstanceName = L"Local\\ModernScreenshot.SingleInstance";
+static const wchar_t *kWakeupMessageName = L"ModernScreenshotWakeup";
+static UINT g_wakeupMessage = 0;
 
 static void ShowTrayBalloon(HWND hwnd, const std::wstring &title, const std::wstring &message);
 
@@ -479,6 +483,30 @@ static bool SetStartupEnabled(bool enabled) {
     LONG status = RegDeleteValueW(key, L"ModernScreenshot");
     RegCloseKey(key);
     return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+}
+
+static void EnsureStartupPathSynced() {
+    HKEY key = NULL;
+    const wchar_t *runKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, runKey, 0, KEY_READ | KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
+        return;
+    }
+    wchar_t stored[MAX_PATH * 2] = {};
+    DWORD bytes = sizeof(stored);
+    DWORD type = 0;
+    LONG status = RegQueryValueExW(key, L"ModernScreenshot", NULL, &type,
+                                   reinterpret_cast<LPBYTE>(stored), &bytes);
+    if (status != ERROR_SUCCESS || type != REG_SZ) {
+        RegCloseKey(key);
+        return;
+    }
+    std::wstring expected = QuotedPath(ModulePath());
+    if (expected != stored) {
+        RegSetValueExW(key, L"ModernScreenshot", 0, REG_SZ,
+                       reinterpret_cast<const BYTE *>(expected.c_str()),
+                       static_cast<DWORD>((expected.size() + 1) * sizeof(wchar_t)));
+    }
+    RegCloseKey(key);
 }
 
 static void BuildRoundedRectPath(GraphicsPath *path, float x, float y, float w, float h, float radius) {
@@ -2814,6 +2842,10 @@ static void ShowTrayMenu(HWND hwnd) {
 }
 
 static LRESULT CALLBACK HiddenProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (g_wakeupMessage && message == g_wakeupMessage) {
+        ShowSettingsWindow();
+        return 0;
+    }
     switch (message) {
     case kTrayMessage:
         if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU) {
@@ -2839,6 +2871,10 @@ static LRESULT CALLBACK HiddenProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         }
         return 0;
     case WM_DESTROY:
+        if (g_settingsWindow) {
+            DestroyWindow(g_settingsWindow);
+            g_settingsWindow = NULL;
+        }
         if (g_hotkeyRegistered) {
             UnregisterHotKey(hwnd, kHotkeyId);
             g_hotkeyRegistered = false;
@@ -2890,6 +2926,46 @@ static void RegisterWindowClasses() {
     RegisterClassW(&settings);
 }
 
+static void UnregisterWindowClasses() {
+    UnregisterClassW(kSettingsClass, g_instance);
+    UnregisterClassW(kEditorClass, g_instance);
+    UnregisterClassW(kLongSessionClass, g_instance);
+    UnregisterClassW(kOverlayClass, g_instance);
+    UnregisterClassW(kHiddenClass, g_instance);
+}
+
+static bool PrintVersionToConsole() {
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
+        return false;
+    }
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (out == INVALID_HANDLE_VALUE || out == NULL) {
+        FreeConsole();
+        return false;
+    }
+    std::wstring line = L"ModernScreenshot ";
+    line += kVersion;
+    line += L"\r\n";
+    DWORD written = 0;
+    WriteConsoleW(out, line.c_str(), static_cast<DWORD>(line.size()), &written, NULL);
+    FreeConsole();
+    return true;
+}
+
+static bool WakePreviousInstance() {
+    HWND existing = FindWindowExW(HWND_MESSAGE, NULL, kHiddenClass, NULL);
+    if (!existing) {
+        return false;
+    }
+    if (!g_wakeupMessage) {
+        g_wakeupMessage = RegisterWindowMessageW(kWakeupMessageName);
+    }
+    if (g_wakeupMessage) {
+        PostMessageW(existing, g_wakeupMessage, 0, 0);
+    }
+    return true;
+}
+
 static int RunDaemon() {
     HWND hwnd = CreateWindowExW(0, kHiddenClass, L"ModernScreenshot", 0, 0, 0, 0, 0,
                                 HWND_MESSAGE, NULL, g_instance, NULL);
@@ -2898,6 +2974,7 @@ static int RunDaemon() {
     }
     g_hiddenWindow = hwnd;
     AddTrayIcon(hwnd);
+    EnsureStartupPathSynced();
 
     if (!RegisterConfiguredHotkey(hwnd, true)) {
         ShowSettingsWindow();
@@ -2917,16 +2994,38 @@ static int RunDaemon() {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_instance = instance;
     SetProcessDPIAware();
-    StartGdiplus();
     LoadSettings();
-    RegisterWindowClasses();
 
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     int status = 0;
+
     if (argc > 1 && wcscmp(argv[1], L"--version") == 0) {
-        status = 0;
-    } else if (argc > 2 && wcscmp(argv[1], L"--self-test") == 0) {
+        PrintVersionToConsole();
+        if (argv) {
+            LocalFree(argv);
+        }
+        return 0;
+    }
+
+    g_wakeupMessage = RegisterWindowMessageW(kWakeupMessageName);
+
+    if (argc == 1) {
+        g_singleInstanceMutex = CreateMutexW(NULL, FALSE, kSingleInstanceName);
+        if (g_singleInstanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+            WakePreviousInstance();
+            CloseHandle(g_singleInstanceMutex);
+            g_singleInstanceMutex = NULL;
+            if (argv) {
+                LocalFree(argv);
+            }
+            return 0;
+        }
+    }
+
+    RegisterWindowClasses();
+
+    if (argc > 2 && wcscmp(argv[1], L"--self-test") == 0) {
         status = SelfTestExport(argv[2]) ? 0 : 1;
     } else if (argc > 1 && wcscmp(argv[1], L"--once") == 0) {
         RunCapture();
@@ -2938,7 +3037,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         status = RunDaemon();
     } else {
         MessageBoxW(NULL,
-                    L"Usage:\nModernScreenshot.exe\nModernScreenshot.exe --once\nModernScreenshot.exe --long\nModernScreenshot.exe --self-test PATH",
+                    L"Usage:\nModernScreenshot.exe\nModernScreenshot.exe --once\nModernScreenshot.exe --long\nModernScreenshot.exe --self-test PATH\nModernScreenshot.exe --version",
                     L"ModernScreenshot", MB_OK);
         status = 2;
     }
@@ -2946,7 +3045,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (argv) {
         LocalFree(argv);
     }
+    UnregisterWindowClasses();
     StopGdiplus();
-    (void)kVersion;
+    if (g_singleInstanceMutex) {
+        CloseHandle(g_singleInstanceMutex);
+        g_singleInstanceMutex = NULL;
+    }
     return status;
 }

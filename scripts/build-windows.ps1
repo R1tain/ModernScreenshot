@@ -10,6 +10,7 @@ $BuildDir = Join-Path $Root "build\windows"
 $PackageDir = Join-Path $BuildDir "package"
 $Exe = Join-Path $BuildDir "ModernScreenshot.exe"
 $Source = Join-Path $Root "src\modern_screenshot_win.cpp"
+$Manifest = Join-Path $Root "src\modern_screenshot.manifest"
 $Zip = Join-Path $BuildDir "ModernScreenshot-windows-x64.zip"
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
@@ -30,6 +31,8 @@ $CommonArgs = @(
     $Source,
     "/link",
     "/SUBSYSTEM:WINDOWS",
+    "/MANIFEST:EMBED",
+    "/MANIFESTINPUT:$Manifest",
     "user32.lib",
     "gdi32.lib",
     "gdiplus.lib",
