@@ -65,7 +65,9 @@ static const int kEditorMargin = 80;
 static const int kLongCaptureMaxFrames = 256;
 static const int kLongCaptureMaxHeight = 60000;
 static const int kLongScrollWaitMs = 260;
-static const int kLongOverlapErrorLimit = 34;
+static const int kLongScrollSettleMs = 80;
+static const int kLongScrollSettleAttempts = 5;
+static const int kLongOverlapErrorLimit = 30;
 static const int kLongSessionW = 360;
 static const int kLongSessionH = 520;
 static const int kSettingsApply = 3001;
@@ -158,11 +160,14 @@ struct LongSessionState {
     int unchangedSteps = 0;
     bool captureLimitReached = false;
     bool lastSampleUnchanged = false;
+    HBITMAP pendingBitmap = NULL;
+    int pendingStableFrames = 0;
     std::wstring statusText;
     HWND target = NULL;
     HWND targetRoot = NULL;
     std::vector<LongFrame> frames;
     std::vector<BYTE> prevPixels;
+    std::vector<BYTE> pendingPixels;
 };
 
 struct EditorState {
@@ -722,26 +727,16 @@ static bool IsSameFramePixels(const std::vector<BYTE> &a, const std::vector<BYTE
 }
 
 static int OverlapError(const std::vector<BYTE> &prev, const std::vector<BYTE> &next, int w, int h, int overlap) {
-    int xStep = std::max(1, w / 40);
-    int yStep = std::max(1, overlap / 40);
+    int xStep = std::max(1, w / 56);
+    int yStep = std::max(1, overlap / 56);
     long long diff = 0;
-    long long movingDiff = 0;
     int samples = 0;
-    int movingSamples = 0;
     for (int y = 0; y < overlap; y += yStep) {
         int prevY = h - overlap + y;
         for (int x = 0; x < w; x += xStep) {
-            int candidateDiff = PixelAbsDiff(PixelAt(prev, w, x, prevY), PixelAt(next, w, x, y));
-            diff += candidateDiff;
+            diff += PixelAbsDiff(PixelAt(prev, w, x, prevY), PixelAt(next, w, x, y));
             ++samples;
-            if (PixelAbsDiff(PixelAt(prev, w, x, y), PixelAt(next, w, x, y)) > 12) {
-                movingDiff += candidateDiff;
-                ++movingSamples;
-            }
         }
-    }
-    if (movingSamples >= 24) {
-        return static_cast<int>(movingDiff / movingSamples);
     }
     return samples > 0 ? static_cast<int>(diff / samples) : 255;
 }
@@ -754,7 +749,7 @@ static int EstimateOverlap(const std::vector<BYTE> &prev, const std::vector<BYTE
         return 0;
     }
 
-    int minOverlap = std::min(h - 1, std::max(24, h / 10));
+    int minOverlap = std::min(h - 1, std::max(48, h / 6));
     int maxOverlap = h - 1;
     int step = std::max(1, h / 120);
     int bestOverlap = minOverlap;
@@ -778,8 +773,8 @@ static int EstimateOverlap(const std::vector<BYTE> &prev, const std::vector<BYTE
         }
     }
 
-    int highStart = std::max(minOverlap, h - std::max(96, h / 8));
-    for (int overlap = highStart; overlap <= maxOverlap; ++overlap) {
+    int tailStart = std::max(minOverlap, h - std::max(96, h / 6));
+    for (int overlap = tailStart; overlap <= maxOverlap; ++overlap) {
         int error = OverlapError(prev, next, w, h, overlap);
         if (error < bestError) {
             bestError = error;
@@ -1150,6 +1145,72 @@ static bool RunSelectionOverlay(const ScreenCapture &capture, RECT *selection, C
     return true;
 }
 
+static void ClearPendingLongFrame(LongSessionState *state) {
+    if (!state) {
+        return;
+    }
+    if (state->pendingBitmap) {
+        DeleteObject(state->pendingBitmap);
+        state->pendingBitmap = NULL;
+    }
+    state->pendingPixels.clear();
+    state->pendingStableFrames = 0;
+}
+
+static bool AppendLongFrameStrip(LongSessionState *state, HBITMAP bitmap, int overlap) {
+    if (!state || !bitmap) {
+        return false;
+    }
+    if (state->totalH >= kLongCaptureMaxHeight ||
+        static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
+        state->captureLimitReached = true;
+        return false;
+    }
+
+    int copyH = state->h - overlap;
+    if (state->totalH + copyH > kLongCaptureMaxHeight) {
+        copyH = kLongCaptureMaxHeight - state->totalH;
+    }
+    if (copyH <= 0) {
+        return false;
+    }
+
+    HBITMAP strip = CopyBitmapStrip(bitmap, state->w, overlap, copyH);
+    if (!strip) {
+        return false;
+    }
+    state->frames.push_back({strip, copyH});
+    state->totalH += copyH;
+    state->lastCopyH = copyH;
+    state->skippedFrames = 0;
+    return true;
+}
+
+static bool AppendPendingLongTail(LongSessionState *state) {
+    if (!state || !state->pendingBitmap || state->pendingPixels.empty()) {
+        return false;
+    }
+    int overlapError = 255 * 3;
+    int overlap = EstimateOverlap(state->prevPixels, state->pendingPixels, state->w, state->h, &overlapError);
+    if (overlap <= 0 || overlap < state->h - std::max(96, state->h / 6)) {
+        return false;
+    }
+
+    HBITMAP bitmap = state->pendingBitmap;
+    state->pendingBitmap = NULL;
+    bool appended = AppendLongFrameStrip(state, bitmap, overlap);
+    DeleteObject(bitmap);
+    if (!appended) {
+        state->pendingPixels.clear();
+        state->pendingStableFrames = 0;
+        return false;
+    }
+    state->prevPixels.swap(state->pendingPixels);
+    state->pendingPixels.clear();
+    state->pendingStableFrames = 0;
+    return true;
+}
+
 static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BYTE> *pixels) {
     if (!state || !bitmap || !pixels) {
         return false;
@@ -1162,6 +1223,7 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
         state->totalH = state->h;
         state->lastCopyH = state->h;
         state->hasPrev = true;
+        ClearPendingLongFrame(state);
         return true;
     }
 
@@ -1176,40 +1238,37 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
     if (overlap <= 0) {
         if (AverageFrameDiff(state->prevPixels, *pixels, state->w, state->h) <= 1) {
             state->lastSampleUnchanged = true;
+        } else if (state->pendingBitmap && IsSameFramePixels(state->pendingPixels, *pixels)) {
+            ++state->pendingStableFrames;
+        } else {
+            ClearPendingLongFrame(state);
+            state->pendingBitmap = bitmap;
+            state->pendingPixels.swap(*pixels);
+            state->pendingStableFrames = 1;
+            ++state->skippedFrames;
+            return false;
         }
         ++state->skippedFrames;
         DeleteObject(bitmap);
         return false;
     }
-    int copyH = state->h - overlap;
-    if (state->totalH >= kLongCaptureMaxHeight ||
-        static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
-        state->captureLimitReached = true;
-        DeleteObject(bitmap);
-        return false;
-    }
-    if (state->totalH + copyH > kLongCaptureMaxHeight) {
-        copyH = kLongCaptureMaxHeight - state->totalH;
-    }
-    if (copyH <= 0) {
-        DeleteObject(bitmap);
-        return false;
-    }
 
-    HBITMAP strip = CopyBitmapStrip(bitmap, state->w, overlap, copyH);
+    bool appended = AppendLongFrameStrip(state, bitmap, overlap);
     DeleteObject(bitmap);
-    if (!strip) {
+    if (!appended) {
         return false;
     }
-    state->frames.push_back({strip, copyH});
-    state->totalH += copyH;
-    state->lastCopyH = copyH;
-    state->skippedFrames = 0;
     state->prevPixels.swap(*pixels);
+    ClearPendingLongFrame(state);
     return true;
 }
 
-static bool SampleLongSelection(LongSessionState *state) {
+static void PumpMessagesFor(HWND hwnd, int milliseconds);
+
+static bool CaptureLongSelectionPixels(LongSessionState *state, HBITMAP *outBitmap, std::vector<BYTE> *outPixels) {
+    if (!state || !outBitmap || !outPixels) {
+        return false;
+    }
     HBITMAP bitmap = CaptureScreenRect(state->selection);
     std::vector<BYTE> pixels;
     if (!bitmap || !ReadBitmapPixels(bitmap, state->w, state->h, &pixels)) {
@@ -1218,7 +1277,53 @@ static bool SampleLongSelection(LongSessionState *state) {
         }
         return false;
     }
+    *outBitmap = bitmap;
+    outPixels->swap(pixels);
+    return true;
+}
+
+static bool SampleLongSelection(LongSessionState *state) {
+    HBITMAP bitmap = NULL;
+    std::vector<BYTE> pixels;
+    if (!CaptureLongSelectionPixels(state, &bitmap, &pixels)) {
+        return false;
+    }
     return AddLongFrame(state, bitmap, &pixels);
+}
+
+static bool SampleStableLongSelection(LongSessionState *state, HWND hwnd) {
+    HBITMAP currentBitmap = NULL;
+    std::vector<BYTE> currentPixels;
+    if (!CaptureLongSelectionPixels(state, &currentBitmap, &currentPixels)) {
+        return false;
+    }
+
+    for (int attempt = 0; attempt < kLongScrollSettleAttempts && IsWindow(hwnd); ++attempt) {
+        PumpMessagesFor(hwnd, kLongScrollSettleMs);
+        if (state->done || state->cancelled || !IsWindow(hwnd)) {
+            DeleteObject(currentBitmap);
+            return false;
+        }
+
+        HBITMAP nextBitmap = NULL;
+        std::vector<BYTE> nextPixels;
+        if (!CaptureLongSelectionPixels(state, &nextBitmap, &nextPixels)) {
+            DeleteObject(currentBitmap);
+            return false;
+        }
+
+        int diff = AverageFrameDiff(currentPixels, nextPixels, state->w, state->h);
+        DeleteObject(currentBitmap);
+        currentBitmap = nextBitmap;
+        currentPixels.swap(nextPixels);
+        if (diff <= 1) {
+            bool added = AddLongFrame(state, currentBitmap, &currentPixels);
+            return added;
+        }
+    }
+
+    bool added = AddLongFrame(state, currentBitmap, &currentPixels);
+    return added;
 }
 
 static bool IsOwnWindow(HWND hwnd) {
@@ -1597,6 +1702,7 @@ static HBITMAP RunLongSession(const RECT &selection, HWND preferredTarget, int *
         for (LongFrame &frame : state.frames) {
             DeleteObject(frame.bitmap);
         }
+        ClearPendingLongFrame(&state);
         return NULL;
     }
 
@@ -1631,14 +1737,15 @@ static HBITMAP RunLongSession(const RECT &selection, HWND preferredTarget, int *
             break;
         }
 
-        bool added = SampleLongSelection(&state);
+        bool added = SampleStableLongSelection(&state, hwnd);
         if (added) {
             state.unchangedSteps = 0;
             state.statusText = L"Auto scrolling...";
             InvalidateRect(hwnd, NULL, FALSE);
         } else if (!state.lastSampleUnchanged) {
             state.unchangedSteps = 0;
-            state.statusText = L"Waiting for stable overlap...";
+            state.statusText = state.pendingStableFrames >= 2 ? L"At bottom or content changed. Verifying..." :
+                                                                 L"Waiting for stable overlap...";
             InvalidateRect(hwnd, NULL, FALSE);
         } else {
             ++state.unchangedSteps;
@@ -1654,7 +1761,7 @@ static HBITMAP RunLongSession(const RECT &selection, HWND preferredTarget, int *
                 if (state.done || state.cancelled || !IsWindow(hwnd)) {
                     break;
                 }
-                if (SampleLongSelection(&state)) {
+                if (SampleStableLongSelection(&state, hwnd)) {
                     state.unchangedSteps = 0;
                     state.statusText = L"Auto scrolling...";
                     InvalidateRect(hwnd, NULL, FALSE);
@@ -1663,6 +1770,12 @@ static HBITMAP RunLongSession(const RECT &selection, HWND preferredTarget, int *
                 if (!state.lastSampleUnchanged) {
                     state.unchangedSteps = 0;
                     state.statusText = L"Waiting for stable overlap...";
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    continue;
+                }
+                if (state.pendingStableFrames >= 2 && AppendPendingLongTail(&state)) {
+                    state.unchangedSteps = 0;
+                    state.statusText = L"Added final tail.";
                     InvalidateRect(hwnd, NULL, FALSE);
                     continue;
                 }
@@ -1686,6 +1799,7 @@ static HBITMAP RunLongSession(const RECT &selection, HWND preferredTarget, int *
     for (LongFrame &frame : state.frames) {
         DeleteObject(frame.bitmap);
     }
+    ClearPendingLongFrame(&state);
     return stitched;
 }
 
