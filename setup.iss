@@ -18,11 +18,11 @@ UninstallDisplayIcon={app}\ModernScreenshot.exe
 PrivilegesRequired=lowest
 
 [Languages]
-Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"; Flags: unchecked
-Name: "autostart"; Description: "开机自动启动"; GroupDescription: "其他选项:"; Flags: unchecked
+Name: "desktopicon"; Description: "Create desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
+Name: "autostart"; Description: "Launch at Windows startup"; GroupDescription: "Other options:"; Flags: unchecked
 
 [Files]
 Source: "bin\Release\net6.0-windows\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -47,10 +47,10 @@ Type: filesandordirs; Name: "{app}\Temp"
 function InitializeSetup(): Boolean;
 begin
   Result := True;
-  // 检查 D 盘是否存在
+  // Check if D drive exists
   if not DirExists('D:\') then
   begin
-    MsgBox('警告: D 盘不存在，将使用默认安装路径。', mbInformation, MB_OK);
+    MsgBox('Warning: D drive not found. Will use default installation path.', mbInformation, MB_OK);
   end;
 end;
 
@@ -58,7 +58,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
-    // 创建必要的目录
+    // Create necessary directories
     CreateDir(ExpandConstant('{app}\Screenshots'));
     CreateDir(ExpandConstant('{app}\Config'));
     CreateDir(ExpandConstant('{app}\Temp'));
