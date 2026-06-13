@@ -3,51 +3,42 @@ use windows::{
     Win32::Foundation::*,
     Win32::Graphics::Gdi::*,
     Win32::UI::WindowsAndMessaging::*,
-    Win32::UI::Controls::Dialogs::*,
-    Win32::System::Com::*,
     Win32::Storage::FileSystem::*,
 };
-use std::ptr;
 
 pub unsafe fn save_bitmap_to_file(hdc: HDC, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
-    // 创建文件对话框
-    let mut filename = [0u16; 260];
-    let filter = "PNG Files\0*.png\0All Files\0*.*\0\0";
-    let filter_wide: Vec<u16> = filter.encode_utf16().collect();
+    // 简化版：保存到固定路径
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
 
-    let mut ofn = OPENFILENAMEW {
-        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: HWND(0),
-        lpstrFilter: PCWSTR(filter_wide.as_ptr()),
-        lpstrFile: PWSTR(filename.as_mut_ptr()),
-        nMaxFile: 260,
-        lpstrDefExt: w!("png"),
-        Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST,
-        ..Default::default()
-    };
+    let filename = format!("D:\\screenshot_{}.bmp\0", timestamp);
+    let filename_wide: Vec<u16> = filename.encode_utf16().collect();
 
-    if GetSaveFileNameW(&mut ofn).as_bool() {
-        // 创建位图
-        let mem_dc = CreateCompatibleDC(hdc);
-        let hbitmap = CreateCompatibleBitmap(hdc, width, height)?;
-        SelectObject(mem_dc, hbitmap);
+    // 创建位图
+    let mem_dc = CreateCompatibleDC(hdc);
+    let hbitmap = CreateCompatibleBitmap(hdc, width, height)?;
+    SelectObject(mem_dc, hbitmap);
 
-        // 复制区域
-        BitBlt(mem_dc, 0, 0, width, height, hdc, x, y, SRCCOPY)?;
+    // 复制区域
+    BitBlt(mem_dc, 0, 0, width, height, hdc, x, y, SRCCOPY)?;
 
-        // 保存为文件（简化版：使用 BMP 格式）
-        save_bitmap_as_bmp(&filename, hbitmap, width, height)?;
+    // 保存为 BMP
+    save_bitmap_as_bmp(&filename_wide, hbitmap, width, height)?;
 
-        DeleteDC(mem_dc);
-        DeleteObject(hbitmap);
+    DeleteDC(mem_dc);
+    DeleteObject(hbitmap);
 
-        MessageBoxW(
-            HWND(0),
-            w!("截图已保存！"),
-            w!("成功"),
-            MB_OK | MB_ICONINFORMATION,
-        );
-    }
+    let msg = format!("截图已保存到:\n{}", filename.trim_end_matches('\0'));
+    let msg_wide: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
+
+    MessageBoxW(
+        HWND(0),
+        PCWSTR(msg_wide.as_ptr()),
+        w!("保存成功"),
+        MB_OK | MB_ICONINFORMATION,
+    );
 
     Ok(())
 }
@@ -81,7 +72,7 @@ unsafe fn save_bitmap_as_bmp(filename: &[u16], hbitmap: HBITMAP, width: i32, hei
         DIB_RGB_COLORS,
     );
 
-    // 写入 BMP 文件
+    // BMP 文件头
     let file_size = 54 + image_size;
     let mut file_header = [0u8; 54];
 
@@ -98,6 +89,7 @@ unsafe fn save_bitmap_as_bmp(filename: &[u16], hbitmap: HBITMAP, width: i32, hei
     file_header[26..28].copy_from_slice(&1u16.to_le_bytes());
     file_header[28..30].copy_from_slice(&24u16.to_le_bytes());
 
+    // 写入文件
     let h_file = CreateFileW(
         PCWSTR(filename.as_ptr()),
         FILE_GENERIC_WRITE.0,
