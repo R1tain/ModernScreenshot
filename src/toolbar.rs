@@ -210,13 +210,17 @@ impl Toolbar {
         FillRect(hdc, &rect, brush);
         DeleteObject(brush);
 
-        // 绘制图标
+        // 绘制图标文字（使用 TextOutW 代替 DrawTextW）
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, COLORREF(0xFFFFFF));
 
         let icon_wide: Vec<u16> = btn.icon.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut icon_rect = rect.clone();
-        DrawTextW(hdc, &icon_wide, &mut icon_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        // 简单居中：图标位置
+        let text_x = btn.x + (btn.width - 16) / 2;
+        let text_y = btn.y + (btn.height - 16) / 2;
+
+        TextOutW(hdc, text_x, text_y, &icon_wide[..icon_wide.len()-1]);
     }
 
     unsafe fn on_mouse_move(&mut self, x: i32, y: i32) {
