@@ -2,8 +2,8 @@
 
 现代化的 Windows 截图工具，轻量、快速、功能丰富。
 
-[![Build Status](https://github.com/YOUR_USERNAME/ModernScreenshot/workflows/Build%20and%20Release/badge.svg)](https://github.com/YOUR_USERNAME/ModernScreenshot/actions)
-[![Release](https://img.shields.io/github/v/release/YOUR_USERNAME/ModernScreenshot)](https://github.com/YOUR_USERNAME/ModernScreenshot/releases)
+[![Build Status](https://github.com/R1tain/ModernScreenshot/workflows/Build%20and%20Release/badge.svg)](https://github.com/R1tain/ModernScreenshot/actions)
+[![Release](https://img.shields.io/github/v/release/R1tain/ModernScreenshot)](https://github.com/R1tain/ModernScreenshot/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## ✨ 主要特性
@@ -18,7 +18,7 @@
 
 ## 📥 下载安装
 
-前往 [Releases](https://github.com/YOUR_USERNAME/ModernScreenshot/releases) 下载最新版本：
+前往 [Releases](https://github.com/R1tain/ModernScreenshot/releases) 下载最新版本：
 
 | 文件 | 说明 | 大小 |
 |------|------|------|
@@ -74,7 +74,7 @@ D:\ModernScreenshot\              # 应用程序根目录
 ### 构建步骤
 ```bash
 # 克隆仓库
-git clone https://github.com/YOUR_USERNAME/ModernScreenshot.git
+git clone https://github.com/R1tain/ModernScreenshot.git
 cd ModernScreenshot
 
 # 还原依赖
