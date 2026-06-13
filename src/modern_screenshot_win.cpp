@@ -35,10 +35,12 @@ using Gdiplus::Font;
 using Gdiplus::FontStyleBold;
 using Gdiplus::FontStyleRegular;
 using Gdiplus::Graphics;
+using Gdiplus::GraphicsPath;
 using Gdiplus::ImageCodecInfo;
 using Gdiplus::Pen;
 using Gdiplus::PointF;
 using Gdiplus::RectF;
+using Gdiplus::SmoothingModeAntiAlias;
 using Gdiplus::SolidBrush;
 using Gdiplus::Status;
 using Gdiplus::UnitPixel;
@@ -47,11 +49,24 @@ static const wchar_t *kVersion = WIDEN(VERSION);
 static const wchar_t *kHiddenClass = L"ModernScreenshotHidden";
 static const wchar_t *kOverlayClass = L"ModernScreenshotOverlay";
 static const wchar_t *kEditorClass = L"ModernScreenshotEditor";
+static const wchar_t *kSettingsClass = L"ModernScreenshotSettings";
 static const int kHotkeyId = 1001;
-static const int kToolbarH = 52;
-static const int kButtonW = 64;
-static const int kButtonH = 36;
+static const UINT kTrayMessage = WM_APP + 1;
+static const UINT kMenuCapture = 2001;
+static const UINT kMenuSettings = 2002;
+static const UINT kMenuExit = 2003;
+static const int kToolbarH = 58;
+static const int kButtonW = 70;
+static const int kButtonH = 38;
 static const int kButtonGap = 8;
+static const int kSettingsApply = 3001;
+static const int kSettingsCancel = 3002;
+static const int kSettingsCtrl = 3003;
+static const int kSettingsAlt = 3004;
+static const int kSettingsShift = 3005;
+static const int kSettingsWin = 3006;
+static const int kSettingsKey = 3007;
+static const int kSettingsStatus = 3008;
 
 enum Tool {
     ToolBlur,
@@ -120,17 +135,46 @@ struct EditorState {
     bool done = false;
 };
 
+struct Settings {
+    UINT modifiers = MOD_CONTROL;
+    UINT vk = '1';
+};
+
+struct KeyOption {
+    const wchar_t *label;
+    UINT vk;
+};
+
 static ULONG_PTR g_gdiplusToken = 0;
 static HINSTANCE g_instance = NULL;
+static HWND g_hiddenWindow = NULL;
+static HWND g_settingsWindow = NULL;
+static HICON g_trayIcon = NULL;
+static Settings g_settings;
+static bool g_hotkeyRegistered = false;
+static bool g_captureActive = false;
 
 static const ButtonSpec kButtons[] = {
     {ActionToolBlur, ToolBlur, L"Blur"},
-    {ActionToolArrow, ToolArrow, L"->"},
+    {ActionToolArrow, ToolArrow, L"Arrow"},
     {ActionToolRect, ToolRect, L"Box"},
     {ActionToolText, ToolText, L"Text"},
     {ActionUndo, ToolBlur, L"Undo"},
     {ActionCopy, ToolBlur, L"Copy"},
     {ActionSave, ToolBlur, L"Save"},
+};
+
+static const KeyOption kKeyOptions[] = {
+    {L"1", '1'}, {L"2", '2'}, {L"3", '3'}, {L"4", '4'}, {L"5", '5'},
+    {L"A", 'A'}, {L"B", 'B'}, {L"C", 'C'}, {L"D", 'D'}, {L"E", 'E'}, {L"F", 'F'},
+    {L"G", 'G'}, {L"H", 'H'}, {L"I", 'I'}, {L"J", 'J'}, {L"K", 'K'}, {L"L", 'L'},
+    {L"M", 'M'}, {L"N", 'N'}, {L"O", 'O'}, {L"P", 'P'}, {L"Q", 'Q'}, {L"R", 'R'},
+    {L"S", 'S'}, {L"T", 'T'}, {L"U", 'U'}, {L"V", 'V'}, {L"W", 'W'}, {L"X", 'X'},
+    {L"Y", 'Y'}, {L"Z", 'Z'},
+    {L"F1", VK_F1}, {L"F2", VK_F2}, {L"F3", VK_F3}, {L"F4", VK_F4},
+    {L"F5", VK_F5}, {L"F6", VK_F6}, {L"F7", VK_F7}, {L"F8", VK_F8},
+    {L"F9", VK_F9}, {L"F10", VK_F10}, {L"F11", VK_F11}, {L"F12", VK_F12},
+    {L"PrintScreen", VK_SNAPSHOT},
 };
 
 static int ButtonCount() {
@@ -203,6 +247,93 @@ static Action ButtonAt(int x, int y, Tool *tool) {
         }
     }
     return ActionNone;
+}
+
+static int KeyOptionCount() {
+    return static_cast<int>(sizeof(kKeyOptions) / sizeof(kKeyOptions[0]));
+}
+
+static std::wstring ConfigPath() {
+    PWSTR appData = NULL;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &appData))) {
+        dir.assign(appData);
+        CoTaskMemFree(appData);
+    } else {
+        wchar_t temp[MAX_PATH];
+        GetTempPathW(MAX_PATH, temp);
+        dir.assign(temp);
+    }
+
+    if (!dir.empty() && dir.back() != L'\\') {
+        dir.push_back(L'\\');
+    }
+    dir += L"ModernScreenshot";
+    CreateDirectoryW(dir.c_str(), NULL);
+    return dir + L"\\settings.ini";
+}
+
+static std::wstring VkName(UINT vk) {
+    for (int i = 0; i < KeyOptionCount(); ++i) {
+        if (kKeyOptions[i].vk == vk) {
+            return kKeyOptions[i].label;
+        }
+    }
+
+    wchar_t text[64] = {};
+    UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) << 16;
+    if (GetKeyNameTextW(static_cast<LONG>(scan), text, 64) > 0) {
+        return text;
+    }
+    wchar_t fallback[16];
+    wsprintfW(fallback, L"0x%02X", vk);
+    return fallback;
+}
+
+static std::wstring HotkeyText(const Settings &settings) {
+    std::wstring text;
+    if (settings.modifiers & MOD_CONTROL) {
+        text += L"Ctrl+";
+    }
+    if (settings.modifiers & MOD_ALT) {
+        text += L"Alt+";
+    }
+    if (settings.modifiers & MOD_SHIFT) {
+        text += L"Shift+";
+    }
+    if (settings.modifiers & MOD_WIN) {
+        text += L"Win+";
+    }
+    text += VkName(settings.vk);
+    return text;
+}
+
+static void LoadSettings() {
+    std::wstring path = ConfigPath();
+    g_settings.modifiers = GetPrivateProfileIntW(L"hotkey", L"modifiers", MOD_CONTROL, path.c_str());
+    g_settings.vk = GetPrivateProfileIntW(L"hotkey", L"vk", '1', path.c_str());
+    if ((g_settings.modifiers & (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN)) == 0) {
+        g_settings.modifiers = MOD_CONTROL;
+    }
+}
+
+static void SaveSettings() {
+    std::wstring path = ConfigPath();
+    wchar_t value[32];
+    wsprintfW(value, L"%u", g_settings.modifiers);
+    WritePrivateProfileStringW(L"hotkey", L"modifiers", value, path.c_str());
+    wsprintfW(value, L"%u", g_settings.vk);
+    WritePrivateProfileStringW(L"hotkey", L"vk", value, path.c_str());
+}
+
+static void BuildRoundedRectPath(GraphicsPath *path, float x, float y, float w, float h, float radius) {
+    float d = radius * 2.0f;
+    path->Reset();
+    path->AddArc(x, y, d, d, 180.0f, 90.0f);
+    path->AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
+    path->AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
+    path->AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
+    path->CloseFigure();
 }
 
 static bool StartGdiplus() {
@@ -356,7 +487,8 @@ static void DrawOverlay(OverlayState *state, HWND hwnd, HDC dc) {
 
     if (StartGdiplus()) {
         Graphics graphics(dc);
-        SolidBrush shade(Color(120, 8, 12, 16));
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        SolidBrush shade(Color(138, 7, 11, 14));
         graphics.FillRectangle(&shade, 0, 0, state->capture.w, state->capture.h);
     }
 
@@ -368,8 +500,18 @@ static void DrawOverlay(OverlayState *state, HWND hwnd, HDC dc) {
                    local.left, local.top, SRCCOPY);
             if (StartGdiplus()) {
                 Graphics graphics(dc);
-                Pen accent(Color(255, 23, 198, 163), 2.0f);
+                graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+                Pen accent(Color(255, 23, 198, 163), 2.4f);
+                Pen white(Color(220, 245, 251, 248), 1.2f);
                 graphics.DrawRectangle(&accent, local.left, local.top, RectWidth(local), RectHeight(local));
+                int handle = 13;
+                SolidBrush handleBrush(Color(255, 245, 251, 248));
+                graphics.FillEllipse(&handleBrush, local.left - handle / 2, local.top - handle / 2, handle, handle);
+                graphics.FillEllipse(&handleBrush, local.right - handle / 2, local.top - handle / 2, handle, handle);
+                graphics.FillEllipse(&handleBrush, local.left - handle / 2, local.bottom - handle / 2, handle, handle);
+                graphics.FillEllipse(&handleBrush, local.right - handle / 2, local.bottom - handle / 2, handle, handle);
+                graphics.DrawRectangle(&white, local.left + 1, local.top + 1,
+                                       std::max(0, RectWidth(local) - 2), std::max(0, RectHeight(local) - 2));
             }
 
             wchar_t label[64];
@@ -378,7 +520,18 @@ static void DrawOverlay(OverlayState *state, HWND hwnd, HDC dc) {
             if (pill.top < 8) {
                 OffsetRect(&pill, 0, 36);
             }
-            FillRectColor(dc, pill, RGB(16, 21, 24));
+            if (StartGdiplus()) {
+                Graphics graphics(dc);
+                graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+                GraphicsPath path;
+                BuildRoundedRectPath(&path, static_cast<float>(pill.left), static_cast<float>(pill.top),
+                                     static_cast<float>(RectWidth(pill)),
+                                     static_cast<float>(RectHeight(pill)), 7.0f);
+                SolidBrush brush(Color(236, 16, 21, 24));
+                graphics.FillPath(&brush, &path);
+            } else {
+                FillRectColor(dc, pill, RGB(16, 21, 24));
+            }
             DrawTextLabel(dc, label, pill.left + 10, pill.top + 4, RGB(245, 251, 248));
         }
     }
@@ -398,6 +551,8 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
         SetCursor(LoadCursor(NULL, IDC_CROSS));
         return 0;
     }
+    case WM_ERASEBKGND:
+        return 1;
     case WM_SETCURSOR:
         SetCursor(LoadCursor(NULL, IDC_CROSS));
         return TRUE;
@@ -465,6 +620,7 @@ static bool RunSelectionOverlay(const ScreenCapture &capture, RECT *selection) {
     }
 
     ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
 
@@ -495,28 +651,50 @@ static POINT ToImagePoint(EditorState *state, int x, int y) {
 
 static void DrawToolbar(EditorState *state, HDC dc) {
     RECT toolbar = {0, 0, state->winW, kToolbarH};
-    FillRectColor(dc, toolbar, RGB(16, 20, 24));
+    FillRectColor(dc, toolbar, RGB(12, 16, 18));
 
-    HPEN border = CreatePen(PS_SOLID, 1, RGB(58, 74, 80));
-    HGDIOBJ oldPen = SelectObject(dc, border);
-    MoveToEx(dc, 0, kToolbarH - 1, NULL);
-    LineTo(dc, state->winW, kToolbarH - 1);
-    SelectObject(dc, oldPen);
-    DeleteObject(border);
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        SolidBrush panel(Color(245, 18, 24, 27));
+        graphics.FillRectangle(&panel, 0, 0, state->winW, kToolbarH);
+        Pen line(Color(120, 80, 96, 98), 1.0f);
+        graphics.DrawLine(&line, 0, kToolbarH - 1, state->winW, kToolbarH - 1);
+    } else {
+        HPEN border = CreatePen(PS_SOLID, 1, RGB(58, 74, 80));
+        HGDIOBJ oldPen = SelectObject(dc, border);
+        MoveToEx(dc, 0, kToolbarH - 1, NULL);
+        LineTo(dc, state->winW, kToolbarH - 1);
+        SelectObject(dc, oldPen);
+        DeleteObject(border);
+    }
 
     for (int i = 0; i < ButtonCount(); ++i) {
         RECT button = ButtonRect(i);
         bool isTool = kButtons[i].action == ActionToolBlur || kButtons[i].action == ActionToolArrow ||
                       kButtons[i].action == ActionToolRect || kButtons[i].action == ActionToolText;
         bool active = isTool && kButtons[i].tool == state->activeTool;
-        FillRectColor(dc, button, active ? RGB(33, 49, 56) : RGB(22, 29, 34));
-        HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(23, 198, 163) : RGB(58, 74, 80));
-        HGDIOBJ old = SelectObject(dc, pen);
-        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-        Rectangle(dc, button.left, button.top, button.right, button.bottom);
-        SelectObject(dc, oldBrush);
-        SelectObject(dc, old);
-        DeleteObject(pen);
+        if (StartGdiplus()) {
+            Graphics graphics(dc);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            GraphicsPath path;
+            BuildRoundedRectPath(&path, static_cast<float>(button.left), static_cast<float>(button.top),
+                                 static_cast<float>(RectWidth(button)),
+                                 static_cast<float>(RectHeight(button)), 8.0f);
+            SolidBrush fill(active ? Color(255, 28, 48, 52) : Color(255, 21, 28, 31));
+            Pen outline(active ? Color(255, 23, 198, 163) : Color(120, 82, 98, 100), active ? 1.6f : 1.0f);
+            graphics.FillPath(&fill, &path);
+            graphics.DrawPath(&outline, &path);
+        } else {
+            FillRectColor(dc, button, active ? RGB(33, 49, 56) : RGB(22, 29, 34));
+            HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(23, 198, 163) : RGB(58, 74, 80));
+            HGDIOBJ old = SelectObject(dc, pen);
+            HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+            Rectangle(dc, button.left, button.top, button.right, button.bottom);
+            SelectObject(dc, oldBrush);
+            SelectObject(dc, old);
+            DeleteObject(pen);
+        }
 
         SIZE size;
         HFONT font = CreateFontW(-14, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
@@ -673,7 +851,7 @@ static bool CopyEditor(EditorState *state, HWND hwnd) {
 
 static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
     RECT bg = {0, 0, state->winW, state->winH};
-    FillRectColor(dc, bg, RGB(16, 20, 24));
+    FillRectColor(dc, bg, RGB(12, 16, 18));
 
     HDC source = CreateCompatibleDC(dc);
     HGDIOBJ old = SelectObject(source, state->shot);
@@ -773,6 +951,8 @@ static LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         SetFocus(hwnd);
         return 0;
     }
+    case WM_ERASEBKGND:
+        return 1;
     case WM_GETDLGCODE:
         return DLGC_WANTALLKEYS;
     case WM_KEYDOWN:
@@ -918,6 +1098,7 @@ static void RunEditorModal(HBITMAP shot, int w, int h) {
     }
 
     ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
 
@@ -929,8 +1110,13 @@ static void RunEditorModal(HBITMAP shot, int w, int h) {
 }
 
 static void RunCapture() {
+    if (g_captureActive) {
+        return;
+    }
+    g_captureActive = true;
     ScreenCapture capture = CaptureVirtualScreen();
     if (!capture.bitmap) {
+        g_captureActive = false;
         return;
     }
 
@@ -943,6 +1129,7 @@ static void RunCapture() {
         }
     }
     DeleteObject(capture.bitmap);
+    g_captureActive = false;
 }
 
 static bool SelfTestExport(const std::wstring &path) {
@@ -990,14 +1177,273 @@ static bool SelfTestExport(const std::wstring &path) {
     return ok;
 }
 
+static HICON CreateTrayIcon() {
+    HDC screen = GetDC(NULL);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP color = CreateCompatibleBitmap(screen, 32, 32);
+    std::vector<BYTE> maskBits(32 * 32 / 8, 0);
+    HBITMAP mask = CreateBitmap(32, 32, 1, 1, maskBits.data());
+    HGDIOBJ old = SelectObject(dc, color);
+
+    RECT bg = {0, 0, 32, 32};
+    FillRectColor(dc, bg, RGB(16, 20, 24));
+    HBRUSH accent = CreateSolidBrush(RGB(23, 198, 163));
+    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(dc, accent));
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(245, 251, 248));
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    RoundRect(dc, 5, 6, 27, 24, 7, 7);
+    MoveToEx(dc, 11, 15, NULL);
+    LineTo(dc, 21, 15);
+    MoveToEx(dc, 16, 10, NULL);
+    LineTo(dc, 16, 20);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(accent);
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    ReleaseDC(NULL, screen);
+
+    ICONINFO info = {};
+    info.fIcon = TRUE;
+    info.hbmColor = color;
+    info.hbmMask = mask;
+    HICON icon = CreateIconIndirect(&info);
+    DeleteObject(color);
+    DeleteObject(mask);
+    return icon ? icon : LoadIcon(NULL, IDI_APPLICATION);
+}
+
+static void ShowTrayBalloon(HWND hwnd, const std::wstring &title, const std::wstring &message) {
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+    lstrcpynW(nid.szInfoTitle, title.c_str(), ARRAYSIZE(nid.szInfoTitle));
+    lstrcpynW(nid.szInfo, message.c_str(), ARRAYSIZE(nid.szInfo));
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+static bool AddTrayIcon(HWND hwnd) {
+    g_trayIcon = CreateTrayIcon();
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = kTrayMessage;
+    nid.hIcon = g_trayIcon;
+    lstrcpynW(nid.szTip, L"ModernScreenshot", ARRAYSIZE(nid.szTip));
+    if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
+        return false;
+    }
+    nid.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &nid);
+    return true;
+}
+
+static void RemoveTrayIcon(HWND hwnd) {
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+    if (g_trayIcon) {
+        DestroyIcon(g_trayIcon);
+        g_trayIcon = NULL;
+    }
+}
+
+static bool RegisterConfiguredHotkey(HWND hwnd, bool notify) {
+    if (g_hotkeyRegistered) {
+        UnregisterHotKey(hwnd, kHotkeyId);
+        g_hotkeyRegistered = false;
+    }
+
+    UINT modifiers = g_settings.modifiers | MOD_NOREPEAT;
+    if (RegisterHotKey(hwnd, kHotkeyId, modifiers, g_settings.vk)) {
+        g_hotkeyRegistered = true;
+        return true;
+    }
+
+    if (notify) {
+        ShowTrayBalloon(hwnd, L"Hotkey conflict",
+                        HotkeyText(g_settings) + L" is already in use. Open Settings from the tray icon to change it.");
+    }
+    return false;
+}
+
+static void AddKeyOption(HWND combo, const KeyOption &option, bool selected) {
+    LRESULT index = SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option.label));
+    SendMessageW(combo, CB_SETITEMDATA, index, option.vk);
+    if (selected) {
+        SendMessageW(combo, CB_SETCURSEL, index, 0);
+    }
+}
+
+static Settings ReadSettingsControls(HWND hwnd) {
+    Settings next;
+    next.modifiers = 0;
+    if (SendDlgItemMessageW(hwnd, kSettingsCtrl, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        next.modifiers |= MOD_CONTROL;
+    }
+    if (SendDlgItemMessageW(hwnd, kSettingsAlt, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        next.modifiers |= MOD_ALT;
+    }
+    if (SendDlgItemMessageW(hwnd, kSettingsShift, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        next.modifiers |= MOD_SHIFT;
+    }
+    if (SendDlgItemMessageW(hwnd, kSettingsWin, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        next.modifiers |= MOD_WIN;
+    }
+    if (next.modifiers == 0) {
+        next.modifiers = MOD_CONTROL;
+    }
+
+    HWND combo = GetDlgItem(hwnd, kSettingsKey);
+    LRESULT selected = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    if (selected >= 0) {
+        next.vk = static_cast<UINT>(SendMessageW(combo, CB_GETITEMDATA, selected, 0));
+    } else {
+        next.vk = g_settings.vk;
+    }
+    return next;
+}
+
+static void UpdateSettingsStatus(HWND hwnd, const std::wstring &message) {
+    SetWindowTextW(GetDlgItem(hwnd, kSettingsStatus), message.c_str());
+}
+
+static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_CREATE: {
+        CreateWindowW(L"STATIC", L"Hotkey", WS_CHILD | WS_VISIBLE, 22, 22, 220, 20,
+                      hwnd, NULL, g_instance, NULL);
+        CreateWindowW(L"BUTTON", L"Ctrl", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 22, 56, 70, 24,
+                      hwnd, reinterpret_cast<HMENU>(kSettingsCtrl), g_instance, NULL);
+        CreateWindowW(L"BUTTON", L"Alt", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 94, 56, 64, 24,
+                      hwnd, reinterpret_cast<HMENU>(kSettingsAlt), g_instance, NULL);
+        CreateWindowW(L"BUTTON", L"Shift", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 160, 56, 78, 24,
+                      hwnd, reinterpret_cast<HMENU>(kSettingsShift), g_instance, NULL);
+        CreateWindowW(L"BUTTON", L"Win", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 240, 56, 70, 24,
+                      hwnd, reinterpret_cast<HMENU>(kSettingsWin), g_instance, NULL);
+        HWND combo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                   22, 92, 288, 240, hwnd, reinterpret_cast<HMENU>(kSettingsKey), g_instance, NULL);
+        for (int i = 0; i < KeyOptionCount(); ++i) {
+            AddKeyOption(combo, kKeyOptions[i], kKeyOptions[i].vk == g_settings.vk);
+        }
+
+        SendDlgItemMessageW(hwnd, kSettingsCtrl, BM_SETCHECK, (g_settings.modifiers & MOD_CONTROL) ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendDlgItemMessageW(hwnd, kSettingsAlt, BM_SETCHECK, (g_settings.modifiers & MOD_ALT) ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendDlgItemMessageW(hwnd, kSettingsShift, BM_SETCHECK, (g_settings.modifiers & MOD_SHIFT) ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendDlgItemMessageW(hwnd, kSettingsWin, BM_SETCHECK, (g_settings.modifiers & MOD_WIN) ? BST_CHECKED : BST_UNCHECKED, 0);
+        CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 22, 132, 320, 24,
+                      hwnd, reinterpret_cast<HMENU>(kSettingsStatus), g_instance, NULL);
+        CreateWindowW(L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 154, 172, 82, 32,
+                      hwnd, reinterpret_cast<HMENU>(kSettingsApply), g_instance, NULL);
+        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE, 244, 172, 82, 32,
+                      hwnd, reinterpret_cast<HMENU>(kSettingsCancel), g_instance, NULL);
+        UpdateSettingsStatus(hwnd, L"Current: " + HotkeyText(g_settings));
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == kSettingsApply) {
+            Settings old = g_settings;
+            g_settings = ReadSettingsControls(hwnd);
+            if (RegisterConfiguredHotkey(g_hiddenWindow, false)) {
+                SaveSettings();
+                ShowTrayBalloon(g_hiddenWindow, L"Hotkey updated", HotkeyText(g_settings));
+                DestroyWindow(hwnd);
+            } else {
+                g_settings = old;
+                RegisterConfiguredHotkey(g_hiddenWindow, false);
+                UpdateSettingsStatus(hwnd, L"Conflict: " + HotkeyText(ReadSettingsControls(hwnd)));
+                MessageBoxW(hwnd, L"This hotkey is already in use. Choose another combination.",
+                            L"ModernScreenshot", MB_ICONWARNING);
+            }
+            return 0;
+        }
+        if (LOWORD(wParam) == kSettingsCancel) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_ERASEBKGND: {
+        RECT rect;
+        GetClientRect(hwnd, &rect);
+        FillRectColor(reinterpret_cast<HDC>(wParam), rect, RGB(245, 248, 247));
+        return 1;
+    }
+    case WM_DESTROY:
+        if (g_settingsWindow == hwnd) {
+            g_settingsWindow = NULL;
+        }
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+static void ShowSettingsWindow() {
+    if (g_settingsWindow) {
+        ShowWindow(g_settingsWindow, SW_SHOW);
+        SetForegroundWindow(g_settingsWindow);
+        return;
+    }
+
+    g_settingsWindow = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClass, L"ModernScreenshot Settings",
+                                       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
+                                       370, 260, NULL, NULL, g_instance, NULL);
+    if (g_settingsWindow) {
+        ShowWindow(g_settingsWindow, SW_SHOW);
+        SetForegroundWindow(g_settingsWindow);
+    }
+}
+
+static void ShowTrayMenu(HWND hwnd) {
+    POINT cursor;
+    GetCursorPos(&cursor);
+    HMENU menu = CreatePopupMenu();
+    std::wstring capture = L"Capture (" + HotkeyText(g_settings) + L")";
+    AppendMenuW(menu, MF_STRING, kMenuCapture, capture.c_str());
+    AppendMenuW(menu, MF_STRING, kMenuSettings, L"Settings...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, kMenuExit, L"Exit");
+    SetForegroundWindow(hwnd);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN, cursor.x, cursor.y, 0, hwnd, NULL);
+    DestroyMenu(menu);
+}
+
 static LRESULT CALLBACK HiddenProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
-    case WM_HOTKEY:
-        if (wParam == kHotkeyId) {
+    case kTrayMessage:
+        if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU) {
+            ShowTrayMenu(hwnd);
+        } else if (LOWORD(lParam) == WM_LBUTTONDBLCLK) {
             RunCapture();
         }
         return 0;
+    case WM_HOTKEY:
+        if (wParam == kHotkeyId && !g_captureActive) {
+            RunCapture();
+        }
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == kMenuCapture) {
+            RunCapture();
+        } else if (LOWORD(wParam) == kMenuSettings) {
+            ShowSettingsWindow();
+        } else if (LOWORD(wParam) == kMenuExit) {
+            DestroyWindow(hwnd);
+        }
+        return 0;
     case WM_DESTROY:
+        if (g_hotkeyRegistered) {
+            UnregisterHotKey(hwnd, kHotkeyId);
+            g_hotkeyRegistered = false;
+        }
+        RemoveTrayIcon(hwnd);
         PostQuitMessage(0);
         return 0;
     }
@@ -1015,6 +1461,7 @@ static void RegisterWindowClasses() {
     overlay.lpfnWndProc = OverlayProc;
     overlay.hInstance = g_instance;
     overlay.hCursor = LoadCursor(NULL, IDC_CROSS);
+    overlay.hbrBackground = NULL;
     overlay.lpszClassName = kOverlayClass;
     RegisterClassW(&overlay);
 
@@ -1022,8 +1469,17 @@ static void RegisterWindowClasses() {
     editor.lpfnWndProc = EditorProc;
     editor.hInstance = g_instance;
     editor.hCursor = LoadCursor(NULL, IDC_ARROW);
+    editor.hbrBackground = NULL;
     editor.lpszClassName = kEditorClass;
     RegisterClassW(&editor);
+
+    WNDCLASSW settings = {};
+    settings.lpfnWndProc = SettingsProc;
+    settings.hInstance = g_instance;
+    settings.hCursor = LoadCursor(NULL, IDC_ARROW);
+    settings.hbrBackground = NULL;
+    settings.lpszClassName = kSettingsClass;
+    RegisterClassW(&settings);
 }
 
 static int RunDaemon() {
@@ -1032,11 +1488,13 @@ static int RunDaemon() {
     if (!hwnd) {
         return 1;
     }
+    g_hiddenWindow = hwnd;
+    AddTrayIcon(hwnd);
 
-    if (!RegisterHotKey(hwnd, kHotkeyId, MOD_CONTROL | MOD_NOREPEAT, '1')) {
-        MessageBoxW(NULL, L"Ctrl+1 is already in use.", L"ModernScreenshot", MB_ICONERROR);
-        DestroyWindow(hwnd);
-        return 1;
+    if (!RegisterConfiguredHotkey(hwnd, true)) {
+        ShowSettingsWindow();
+    } else {
+        ShowTrayBalloon(hwnd, L"ModernScreenshot is running", L"Use " + HotkeyText(g_settings) + L" or the tray menu.");
     }
 
     MSG msg;
@@ -1045,8 +1503,6 @@ static int RunDaemon() {
         DispatchMessageW(&msg);
     }
 
-    UnregisterHotKey(hwnd, kHotkeyId);
-    DestroyWindow(hwnd);
     return 0;
 }
 
@@ -1054,6 +1510,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_instance = instance;
     SetProcessDPIAware();
     StartGdiplus();
+    LoadSettings();
     RegisterWindowClasses();
 
     int argc = 0;

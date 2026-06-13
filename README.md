@@ -15,6 +15,9 @@ The implementation is intentionally small:
 ## Features
 
 - `Ctrl+1` global hotkey
+- Windows tray icon with Capture, Settings, and Exit
+- configurable Windows hotkey stored in `%APPDATA%\ModernScreenshot\settings.ini`
+- hotkey conflict warning with a settings entry point
 - region selection overlay
 - editor toolbar: blur, arrow, rectangle, text, undo, copy, save
 - mosaic blur for sensitive content
@@ -40,7 +43,7 @@ Windows:
 
 The executable is written to `build\windows\ModernScreenshot.exe`, and the zip package is written to `build\windows\ModernScreenshot-windows-x64.zip`.
 
-GitHub Actions also publishes the same zip as the `ModernScreenshot-windows-x64` artifact on every push.
+Release builds are published by GitHub Actions to GitHub Releases. Download `ModernScreenshot-windows-x64.zip` from the latest release for Windows.
 
 ## Run
 
@@ -56,7 +59,9 @@ Windows:
 .\build\windows\ModernScreenshot.exe
 ```
 
-Press `Ctrl+1`, drag a region, and release the mouse. The editor opens on the captured region:
+On Windows, the app stays in the system tray. Use the tray menu to capture, open settings, or exit. If `Ctrl+1` is already used by another app, open Settings from the tray menu and choose another hotkey.
+
+Press the configured hotkey, drag a region, and release the mouse. The editor opens on the captured region:
 
 - `Blur`, `->`, `Box`, and `Text` choose the active tool
 - `Undo` removes the last annotation
@@ -106,6 +111,22 @@ The check fails if idle RSS is above `5120 KB`. You can override the threshold:
 ```sh
 MODERN_SCREENSHOT_RSS_LIMIT_KB=5120 make memory-check
 ```
+
+## Publish A Release
+
+Create and push a version tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The `release` workflow builds Linux and Windows packages, creates a GitHub Release, and uploads:
+
+- `ModernScreenshot-linux-x64.tar.gz`
+- `ModernScreenshot-windows-x64.zip`
+
+You can also run the `release` workflow manually from the Actions tab and provide a tag such as `v0.1.0`.
 
 ## Notes
 
