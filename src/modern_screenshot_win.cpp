@@ -18,7 +18,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <ctime>
 #include <string>
 #include <vector>
 
@@ -55,9 +54,9 @@ static const UINT kTrayMessage = WM_APP + 1;
 static const UINT kMenuCapture = 2001;
 static const UINT kMenuSettings = 2002;
 static const UINT kMenuExit = 2003;
-static const int kToolbarH = 58;
-static const int kButtonW = 70;
-static const int kButtonH = 38;
+static const int kToolbarH = 64;
+static const int kButtonW = 58;
+static const int kButtonH = 46;
 static const int kButtonGap = 8;
 static const int kSettingsApply = 3001;
 static const int kSettingsCancel = 3002;
@@ -132,6 +131,7 @@ struct EditorState {
     bool textEntry = false;
     POINT textPoint = {0, 0};
     std::wstring textBuffer;
+    std::wstring statusText;
     bool done = false;
 };
 
@@ -153,6 +153,8 @@ static HICON g_trayIcon = NULL;
 static Settings g_settings;
 static bool g_hotkeyRegistered = false;
 static bool g_captureActive = false;
+
+static void ShowTrayBalloon(HWND hwnd, const std::wstring &title, const std::wstring &message);
 
 static const ButtonSpec kButtons[] = {
     {ActionToolBlur, ToolBlur, L"Blur"},
@@ -237,6 +239,18 @@ static RECT ButtonRect(int index) {
 
 static bool PointInRect(int x, int y, const RECT &rect) {
     return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+}
+
+static bool IsRectEmptyOrInvalid(const RECT &rect) {
+    return rect.right <= rect.left || rect.bottom <= rect.top;
+}
+
+static RECT ExpandedRect(RECT rect, int amount, int maxW, int maxH) {
+    rect.left = Clamp(rect.left - amount, 0, maxW);
+    rect.top = Clamp(rect.top - amount, 0, maxH);
+    rect.right = Clamp(rect.right + amount, 0, maxW);
+    rect.bottom = Clamp(rect.bottom + amount, 0, maxH);
+    return rect;
 }
 
 static Action ButtonAt(int x, int y, Tool *tool) {
@@ -406,19 +420,13 @@ static std::wstring BuildScreenshotPath() {
     dir += L"Screenshots";
     CreateDirectoryW(dir.c_str(), NULL);
 
-    std::time_t now = std::time(NULL);
-    std::tm localTime = {};
-#ifdef _MSC_VER
-    localtime_s(&localTime, &now);
-#else
-    std::tm *tmp = std::localtime(&now);
-    if (tmp) {
-        localTime = *tmp;
-    }
-#endif
-
-    wchar_t stamp[32];
-    wcsftime(stamp, 32, L"%Y%m%d-%H%M%S", &localTime);
+    SYSTEMTIME localTime;
+    GetLocalTime(&localTime);
+    wchar_t stamp[48];
+    wsprintfW(stamp, L"%04u%02u%02u-%02u%02u%02u-%03u",
+              localTime.wYear, localTime.wMonth, localTime.wDay,
+              localTime.wHour, localTime.wMinute, localTime.wSecond,
+              localTime.wMilliseconds);
     return dir + L"\\Screenshot-" + stamp + L".png";
 }
 
@@ -480,10 +488,27 @@ static void DrawTextLabel(HDC dc, const std::wstring &text, int x, int y, COLORR
     DeleteObject(font);
 }
 
-static void DrawOverlay(OverlayState *state, HWND hwnd, HDC dc) {
+static void DrawCenteredText(HDC dc, const wchar_t *text, const RECT &rect, int fontHeight, int weight, COLORREF color) {
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color);
+    HFONT font = CreateFontW(fontHeight, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SIZE size;
+    int len = static_cast<int>(wcslen(text));
+    GetTextExtentPoint32W(dc, text, len, &size);
+    TextOutW(dc, rect.left + (RectWidth(rect) - size.cx) / 2,
+             rect.top + (RectHeight(rect) - size.cy) / 2,
+             text, len);
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+}
+
+static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offsetX, int offsetY) {
     HDC source = CreateCompatibleDC(dc);
     HGDIOBJ old = SelectObject(source, state->capture.bitmap);
-    BitBlt(dc, 0, 0, state->capture.w, state->capture.h, source, 0, 0, SRCCOPY);
+    BitBlt(dc, -offsetX, -offsetY, state->capture.w, state->capture.h, source, 0, 0, SRCCOPY);
 
     if (StartGdiplus()) {
         Graphics graphics(dc);
@@ -496,21 +521,24 @@ static void DrawOverlay(OverlayState *state, HWND hwnd, HDC dc) {
         RECT local = NormalizeRectPoints(state->start, state->current);
         local = ClampRect(local, 0, 0, state->capture.w, state->capture.h);
         if (RectWidth(local) > 0 && RectHeight(local) > 0) {
-            BitBlt(dc, local.left, local.top, RectWidth(local), RectHeight(local), source,
+            BitBlt(dc, local.left - offsetX, local.top - offsetY, RectWidth(local), RectHeight(local), source,
                    local.left, local.top, SRCCOPY);
             if (StartGdiplus()) {
                 Graphics graphics(dc);
                 graphics.SetSmoothingMode(SmoothingModeAntiAlias);
                 Pen accent(Color(255, 23, 198, 163), 2.4f);
                 Pen white(Color(220, 245, 251, 248), 1.2f);
-                graphics.DrawRectangle(&accent, local.left, local.top, RectWidth(local), RectHeight(local));
+                int drawLeft = local.left - offsetX;
+                int drawTop = local.top - offsetY;
+                graphics.DrawRectangle(&accent, drawLeft, drawTop, RectWidth(local), RectHeight(local));
                 int handle = 13;
                 SolidBrush handleBrush(Color(255, 245, 251, 248));
-                graphics.FillEllipse(&handleBrush, local.left - handle / 2, local.top - handle / 2, handle, handle);
-                graphics.FillEllipse(&handleBrush, local.right - handle / 2, local.top - handle / 2, handle, handle);
-                graphics.FillEllipse(&handleBrush, local.left - handle / 2, local.bottom - handle / 2, handle, handle);
-                graphics.FillEllipse(&handleBrush, local.right - handle / 2, local.bottom - handle / 2, handle, handle);
-                graphics.DrawRectangle(&white, local.left + 1, local.top + 1,
+                graphics.FillEllipse(&handleBrush, drawLeft - handle / 2, drawTop - handle / 2, handle, handle);
+                graphics.FillEllipse(&handleBrush, local.right - offsetX - handle / 2, drawTop - handle / 2, handle, handle);
+                graphics.FillEllipse(&handleBrush, drawLeft - handle / 2, local.bottom - offsetY - handle / 2, handle, handle);
+                graphics.FillEllipse(&handleBrush, local.right - offsetX - handle / 2,
+                                     local.bottom - offsetY - handle / 2, handle, handle);
+                graphics.DrawRectangle(&white, drawLeft + 1, drawTop + 1,
                                        std::max(0, RectWidth(local) - 2), std::max(0, RectHeight(local) - 2));
             }
 
@@ -524,21 +552,95 @@ static void DrawOverlay(OverlayState *state, HWND hwnd, HDC dc) {
                 Graphics graphics(dc);
                 graphics.SetSmoothingMode(SmoothingModeAntiAlias);
                 GraphicsPath path;
-                BuildRoundedRectPath(&path, static_cast<float>(pill.left), static_cast<float>(pill.top),
+                BuildRoundedRectPath(&path, static_cast<float>(pill.left - offsetX),
+                                     static_cast<float>(pill.top - offsetY),
                                      static_cast<float>(RectWidth(pill)),
                                      static_cast<float>(RectHeight(pill)), 7.0f);
                 SolidBrush brush(Color(236, 16, 21, 24));
                 graphics.FillPath(&brush, &path);
             } else {
-                FillRectColor(dc, pill, RGB(16, 21, 24));
+                RECT drawPill = {pill.left - offsetX, pill.top - offsetY,
+                                 pill.right - offsetX, pill.bottom - offsetY};
+                FillRectColor(dc, drawPill, RGB(16, 21, 24));
             }
-            DrawTextLabel(dc, label, pill.left + 10, pill.top + 4, RGB(245, 251, 248));
+            DrawTextLabel(dc, label, pill.left - offsetX + 10, pill.top - offsetY + 4, RGB(245, 251, 248));
         }
     }
 
     SelectObject(source, old);
     DeleteDC(source);
     (void)hwnd;
+}
+
+static void DrawOverlay(OverlayState *state, HWND hwnd, HDC dc) {
+    DrawOverlayOffset(state, hwnd, dc, 0, 0);
+}
+
+static RECT OverlayVisualBounds(OverlayState *state) {
+    RECT empty = {0, 0, 0, 0};
+    if (!state || !state->dragging) {
+        return empty;
+    }
+
+    RECT local = NormalizeRectPoints(state->start, state->current);
+    local = ClampRect(local, 0, 0, state->capture.w, state->capture.h);
+    if (RectWidth(local) <= 0 || RectHeight(local) <= 0) {
+        return empty;
+    }
+
+    RECT bounds = ExpandedRect(local, 20, state->capture.w, state->capture.h);
+    RECT label = {local.left, local.top - 28, local.left + 92, local.top - 4};
+    if (label.top < 8) {
+        OffsetRect(&label, 0, 36);
+    }
+    label = ClampRect(label, 0, 0, state->capture.w, state->capture.h);
+    UnionRect(&bounds, &bounds, &label);
+    return ExpandedRect(bounds, 2, state->capture.w, state->capture.h);
+}
+
+static void InvalidateOverlayChange(HWND hwnd, OverlayState *state, const RECT &oldBounds) {
+    RECT next = OverlayVisualBounds(state);
+    if (IsRectEmptyOrInvalid(oldBounds) && IsRectEmptyOrInvalid(next)) {
+        return;
+    }
+
+    RECT dirty = {};
+    if (IsRectEmptyOrInvalid(oldBounds)) {
+        dirty = next;
+    } else if (IsRectEmptyOrInvalid(next)) {
+        dirty = oldBounds;
+    } else {
+        UnionRect(&dirty, &oldBounds, &next);
+    }
+    InvalidateRect(hwnd, &dirty, FALSE);
+}
+
+static void PaintOverlayBuffered(OverlayState *state, HWND hwnd, HDC dc, const RECT &paint) {
+    int w = RectWidth(paint);
+    int h = RectHeight(paint);
+    if (!state || w <= 0 || h <= 0) {
+        return;
+    }
+
+    HDC memory = CreateCompatibleDC(dc);
+    HBITMAP buffer = CreateCompatibleBitmap(dc, w, h);
+    if (!memory || !buffer) {
+        if (buffer) {
+            DeleteObject(buffer);
+        }
+        if (memory) {
+            DeleteDC(memory);
+        }
+        DrawOverlay(state, hwnd, dc);
+        return;
+    }
+
+    HGDIOBJ old = SelectObject(memory, buffer);
+    DrawOverlayOffset(state, hwnd, memory, paint.left, paint.top);
+    BitBlt(dc, paint.left, paint.top, w, h, memory, 0, 0, SRCCOPY);
+    SelectObject(memory, old);
+    DeleteObject(buffer);
+    DeleteDC(memory);
 }
 
 static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -569,13 +671,13 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
             state->dragging = true;
             state->start = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             state->current = state->start;
-            InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
     case WM_MOUSEMOVE:
         if (state && state->dragging) {
+            RECT oldBounds = OverlayVisualBounds(state);
             state->current = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            InvalidateRect(hwnd, NULL, FALSE);
+            InvalidateOverlayChange(hwnd, state, oldBounds);
         }
         return 0;
     case WM_LBUTTONUP:
@@ -598,7 +700,7 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
         if (state) {
-            DrawOverlay(state, hwnd, dc);
+            PaintOverlayBuffered(state, hwnd, dc, ps.rcPaint);
         }
         EndPaint(hwnd, &ps);
         return 0;
@@ -649,6 +751,69 @@ static POINT ToImagePoint(EditorState *state, int x, int y) {
     return point;
 }
 
+static void DrawToolbarIcon(HDC dc, Action action, const RECT &button, bool active) {
+    COLORREF color = active ? RGB(23, 198, 163) : RGB(238, 244, 242);
+    float x = static_cast<float>(button.left);
+    float y = static_cast<float>(button.top);
+    float w = static_cast<float>(RectWidth(button));
+
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        Color iconColor(255, GetRValue(color), GetGValue(color), GetBValue(color));
+        Color muted(170, GetRValue(color), GetGValue(color), GetBValue(color));
+        Pen pen(iconColor, 2.2f);
+        Pen thin(muted, 1.5f);
+        SolidBrush brush(iconColor);
+        float cx = x + w / 2.0f;
+        float top = y + 9.0f;
+
+        if (action == ActionToolBlur) {
+            float s = 6.5f;
+            float startX = cx - 8.0f;
+            graphics.FillRectangle(&brush, startX, top + 2.0f, s, s);
+            graphics.FillRectangle(&brush, startX + 10.0f, top + 2.0f, s, s);
+            graphics.FillRectangle(&brush, startX, top + 12.0f, s, s);
+            graphics.FillRectangle(&brush, startX + 10.0f, top + 12.0f, s, s);
+        } else if (action == ActionToolArrow) {
+            graphics.DrawLine(&pen, cx - 12.0f, top + 18.0f, cx + 11.0f, top + 5.0f);
+            graphics.DrawLine(&pen, cx + 11.0f, top + 5.0f, cx + 3.0f, top + 5.0f);
+            graphics.DrawLine(&pen, cx + 11.0f, top + 5.0f, cx + 9.0f, top + 13.0f);
+        } else if (action == ActionToolRect) {
+            graphics.DrawRectangle(&pen, cx - 12.0f, top + 4.0f, 24.0f, 16.0f);
+        } else if (action == ActionUndo) {
+            graphics.DrawArc(&pen, cx - 12.0f, top + 4.0f, 24.0f, 18.0f, 35.0f, 285.0f);
+            graphics.DrawLine(&pen, cx - 12.0f, top + 11.0f, cx - 6.0f, top + 4.0f);
+            graphics.DrawLine(&pen, cx - 12.0f, top + 11.0f, cx - 4.0f, top + 13.0f);
+        } else if (action == ActionCopy) {
+            graphics.DrawRectangle(&thin, cx - 7.0f, top + 3.0f, 16.0f, 15.0f);
+            graphics.DrawRectangle(&pen, cx - 11.0f, top + 8.0f, 16.0f, 15.0f);
+        } else if (action == ActionSave) {
+            graphics.DrawLine(&pen, cx, top + 3.0f, cx, top + 17.0f);
+            graphics.DrawLine(&pen, cx, top + 17.0f, cx - 6.0f, top + 11.0f);
+            graphics.DrawLine(&pen, cx, top + 17.0f, cx + 6.0f, top + 11.0f);
+            graphics.DrawLine(&pen, cx - 11.0f, top + 22.0f, cx + 11.0f, top + 22.0f);
+        } else {
+            Font font(L"Segoe UI", 23.0f, FontStyleBold, UnitPixel);
+            graphics.DrawString(L"T", -1, &font, PointF(cx - 7.0f, top - 1.0f), &brush);
+        }
+        return;
+    }
+
+    RECT icon = {button.left + 10, button.top + 6, button.right - 10, button.top + 30};
+    if (action == ActionToolText) {
+        DrawCenteredText(dc, L"T", icon, -24, FW_SEMIBOLD, color);
+    } else {
+        HPEN pen = CreatePen(PS_SOLID, 2, color);
+        HGDIOBJ oldPen = SelectObject(dc, pen);
+        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+        Rectangle(dc, icon.left + 5, icon.top + 5, icon.right - 5, icon.bottom - 5);
+        SelectObject(dc, oldBrush);
+        SelectObject(dc, oldPen);
+        DeleteObject(pen);
+    }
+}
+
 static void DrawToolbar(EditorState *state, HDC dc) {
     RECT toolbar = {0, 0, state->winW, kToolbarH};
     FillRectColor(dc, toolbar, RGB(12, 16, 18));
@@ -696,18 +861,14 @@ static void DrawToolbar(EditorState *state, HDC dc) {
             DeleteObject(pen);
         }
 
-        SIZE size;
-        HFONT font = CreateFontW(-14, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-        HGDIOBJ oldFont = SelectObject(dc, font);
-        GetTextExtentPoint32W(dc, kButtons[i].label, static_cast<int>(wcslen(kButtons[i].label)), &size);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, active ? RGB(23, 198, 163) : RGB(245, 251, 248));
-        TextOutW(dc, button.left + (kButtonW - size.cx) / 2, button.top + 10,
-                 kButtons[i].label, static_cast<int>(wcslen(kButtons[i].label)));
-        SelectObject(dc, oldFont);
-        DeleteObject(font);
+        DrawToolbarIcon(dc, kButtons[i].action, button, active);
+        RECT labelRect = {button.left, button.bottom - 15, button.right, button.bottom - 2};
+        DrawCenteredText(dc, kButtons[i].label, labelRect, -10, FW_MEDIUM,
+                         active ? RGB(23, 198, 163) : RGB(188, 202, 200));
+    }
+
+    if (!state->statusText.empty() && state->winW > ToolbarWidth() + 120) {
+        DrawTextLabel(dc, state->statusText, ToolbarWidth() + 8, 22, RGB(188, 202, 200));
     }
 }
 
@@ -820,12 +981,16 @@ static HBITMAP ComposeEditorBitmap(EditorState *state) {
     return output;
 }
 
-static bool SaveEditor(EditorState *state) {
+static bool SaveEditor(EditorState *state, std::wstring *savedPath) {
     HBITMAP output = ComposeEditorBitmap(state);
     if (!output) {
         return false;
     }
-    bool ok = SaveHbitmapPng(output, BuildScreenshotPath());
+    std::wstring path = BuildScreenshotPath();
+    bool ok = SaveHbitmapPng(output, path);
+    if (ok && savedPath) {
+        *savedPath = path;
+    }
     DeleteObject(output);
     return ok;
 }
@@ -887,6 +1052,37 @@ static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
     (void)hwnd;
 }
 
+static void PaintEditorBuffered(EditorState *state, HWND hwnd, HDC dc, const RECT &paint) {
+    int w = RectWidth(paint);
+    int h = RectHeight(paint);
+    if (!state || w <= 0 || h <= 0) {
+        return;
+    }
+
+    HDC memory = CreateCompatibleDC(dc);
+    HBITMAP buffer = CreateCompatibleBitmap(dc, w, h);
+    if (!memory || !buffer) {
+        if (buffer) {
+            DeleteObject(buffer);
+        }
+        if (memory) {
+            DeleteDC(memory);
+        }
+        DrawEditor(state, hwnd, dc);
+        return;
+    }
+
+    HGDIOBJ old = SelectObject(memory, buffer);
+    int saved = SaveDC(memory);
+    SetViewportOrgEx(memory, -paint.left, -paint.top, NULL);
+    DrawEditor(state, hwnd, memory);
+    RestoreDC(memory, saved);
+    BitBlt(dc, paint.left, paint.top, w, h, memory, 0, 0, SRCCOPY);
+    SelectObject(memory, old);
+    DeleteObject(buffer);
+    DeleteDC(memory);
+}
+
 static void CommitText(EditorState *state) {
     if (state->textBuffer.empty()) {
         state->textEntry = false;
@@ -921,23 +1117,44 @@ static void FinishDrawing(EditorState *state, POINT point) {
     state->drawing = false;
 }
 
+static void NotifyAction(HWND owner, const std::wstring &title, const std::wstring &message) {
+    if (g_hiddenWindow) {
+        ShowTrayBalloon(g_hiddenWindow, title, message);
+    } else {
+        MessageBoxW(owner, message.c_str(), title.c_str(), MB_OK);
+    }
+}
+
 static void HandleAction(EditorState *state, HWND hwnd, Action action, Tool tool) {
     if (action == ActionToolBlur || action == ActionToolArrow || action == ActionToolRect || action == ActionToolText) {
         state->activeTool = tool;
         state->textEntry = false;
+        state->statusText.clear();
     } else if (action == ActionUndo) {
         if (!state->ops.empty()) {
             state->ops.pop_back();
         }
         state->textEntry = false;
+        state->statusText = L"Undo";
     } else if (action == ActionSave) {
-        SaveEditor(state);
-        state->done = true;
-        DestroyWindow(hwnd);
+        std::wstring path;
+        if (SaveEditor(state, &path)) {
+            NotifyAction(hwnd, L"Screenshot saved", path);
+            state->done = true;
+            DestroyWindow(hwnd);
+        } else {
+            state->statusText = L"Save failed";
+            NotifyAction(hwnd, L"Save failed", L"Could not write the screenshot file.");
+        }
     } else if (action == ActionCopy) {
-        CopyEditor(state, hwnd);
-        state->done = true;
-        DestroyWindow(hwnd);
+        if (CopyEditor(state, hwnd)) {
+            NotifyAction(hwnd, L"Screenshot copied", L"Image copied to clipboard.");
+            state->done = true;
+            DestroyWindow(hwnd);
+        } else {
+            state->statusText = L"Copy failed";
+            NotifyAction(hwnd, L"Copy failed", L"Could not write the image to clipboard.");
+        }
     }
 }
 
@@ -1057,7 +1274,7 @@ static LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
         if (state) {
-            DrawEditor(state, hwnd, dc);
+            PaintEditorBuffered(state, hwnd, dc, ps.rcPaint);
         }
         EndPaint(hwnd, &ps);
         return 0;
