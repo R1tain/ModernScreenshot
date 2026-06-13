@@ -126,19 +126,18 @@ MODERN_SCREENSHOT_RSS_LIMIT_KB=5120 make memory-check
 
 ## Publish A Release
 
-Create and push a version tag:
+Push code to `master`:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git push origin master
 ```
 
-The `release` workflow builds Linux and Windows packages, creates a GitHub Release, and uploads:
+The `release` workflow automatically increments the latest `vMAJOR.MINOR.PATCH` tag by one patch version, builds Linux and Windows packages, creates a GitHub Release, and uploads:
 
 - `ModernScreenshot-linux-x64.tar.gz`
 - `ModernScreenshot-windows-x64.zip`
 
-You can also run the `release` workflow manually from the Actions tab and provide a tag such as `v0.1.0`.
+You can still run the `release` workflow manually from the Actions tab. Leave the tag empty for automatic patch increment, or provide a tag such as `v1.0.0`.
 
 ## Notes
 

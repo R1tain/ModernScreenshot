@@ -4,17 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, for example v0.1.0
-        required: true
-        default: v0.1.0
+        description: Optional release tag, for example v1.0.0. Leave empty to auto-increment patch.
+        required: false
+        default: ""
       prerelease:
         description: Mark as prerelease
         required: false
         type: boolean
         default: false
   push:
-    tags:
-      - "v*"
+    branches:
+      - master
+
+concurrency:
+  group: release-master
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -27,18 +31,29 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - id: meta
         shell: bash
         run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            tag="${{ github.ref_name }}"
-            prerelease="false"
+          input_tag="${{ github.event.inputs.tag }}"
+          if [[ -n "$input_tag" ]]; then
+            tag="$input_tag"
+            prerelease="${{ github.event.inputs.prerelease }}"
           else
-            tag="${{ inputs.tag }}"
-            prerelease="${{ inputs.prerelease }}"
+            git fetch --tags --force
+            latest="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+            if [[ -z "$latest" ]]; then
+              latest="v0.0.0"
+            fi
+            version="${latest#v}"
+            IFS=. read -r major minor patch <<< "$version"
+            tag="v${major}.${minor}.$((patch + 1))"
+            prerelease="false"
           fi
 
-          if [[ ! "$tag" =~ ^v[0-9]+(\.[0-9]+)*([-.][A-Za-z0-9]+)*$ ]]; then
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9]+)*$ ]]; then
             echo "Invalid release tag: $tag" >&2
             exit 1
           fi
