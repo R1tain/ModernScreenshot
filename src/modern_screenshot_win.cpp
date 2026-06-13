@@ -52,12 +52,18 @@ static const wchar_t *kSettingsClass = L"ModernScreenshotSettings";
 static const int kHotkeyId = 1001;
 static const UINT kTrayMessage = WM_APP + 1;
 static const UINT kMenuCapture = 2001;
-static const UINT kMenuSettings = 2002;
-static const UINT kMenuExit = 2003;
+static const UINT kMenuLongCapture = 2002;
+static const UINT kMenuSettings = 2003;
+static const UINT kMenuExit = 2004;
 static const int kToolbarH = 64;
 static const int kButtonW = 58;
 static const int kButtonH = 46;
 static const int kButtonGap = 8;
+static const int kEditorMargin = 80;
+static const int kLongCaptureMaxFrames = 8;
+static const int kLongCaptureMaxHeight = 20000;
+static const int kLongCaptureWheelNotches = 7;
+static const int kLongCaptureScrollDelayMs = 260;
 static const int kSettingsApply = 3001;
 static const int kSettingsCancel = 3002;
 static const int kSettingsCtrl = 3003;
@@ -106,6 +112,12 @@ struct ScreenCapture {
     int h = 0;
 };
 
+struct LongFrame {
+    HBITMAP bitmap = NULL;
+    int sourceY = 0;
+    int copyH = 0;
+};
+
 struct OverlayState {
     ScreenCapture capture;
     bool dragging = false;
@@ -124,6 +136,8 @@ struct EditorState {
     int winH = 0;
     int imageX = 0;
     int imageY = 0;
+    int viewH = 0;
+    int scrollY = 0;
     Tool activeTool = ToolRect;
     std::vector<Annotation> ops;
     bool drawing = false;
@@ -470,6 +484,175 @@ static HBITMAP CropCapture(const ScreenCapture &capture, const RECT &selection) 
     return cropped;
 }
 
+static HBITMAP CaptureScreenRect(const RECT &rect) {
+    int w = RectWidth(rect);
+    int h = RectHeight(rect);
+    if (w <= 0 || h <= 0) {
+        return NULL;
+    }
+
+    HDC screen = GetDC(NULL);
+    HDC dest = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, w, h);
+    if (!dest || !bitmap) {
+        if (bitmap) {
+            DeleteObject(bitmap);
+        }
+        if (dest) {
+            DeleteDC(dest);
+        }
+        ReleaseDC(NULL, screen);
+        return NULL;
+    }
+
+    HGDIOBJ oldDest = SelectObject(dest, bitmap);
+    BitBlt(dest, 0, 0, w, h, screen, rect.left, rect.top, SRCCOPY | CAPTUREBLT);
+    SelectObject(dest, oldDest);
+    DeleteDC(dest);
+    ReleaseDC(NULL, screen);
+    return bitmap;
+}
+
+static bool ReadBitmapPixels(HBITMAP bitmap, int w, int h, std::vector<BYTE> *pixels) {
+    if (!bitmap || w <= 0 || h <= 0) {
+        return false;
+    }
+
+    pixels->assign(static_cast<size_t>(w) * static_cast<size_t>(h) * 4, 0);
+    HDC screen = GetDC(NULL);
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = w;
+    info.bmiHeader.biHeight = -h;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    int lines = GetDIBits(screen, bitmap, 0, h, pixels->data(), &info, DIB_RGB_COLORS);
+    ReleaseDC(NULL, screen);
+    return lines == h;
+}
+
+static unsigned int PixelAt(const std::vector<BYTE> &pixels, int w, int x, int y) {
+    size_t index = (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 4;
+    return static_cast<unsigned int>(pixels[index]) |
+           (static_cast<unsigned int>(pixels[index + 1]) << 8) |
+           (static_cast<unsigned int>(pixels[index + 2]) << 16);
+}
+
+static int PixelAbsDiff(unsigned int a, unsigned int b) {
+    int db = static_cast<int>(a & 0xff) - static_cast<int>(b & 0xff);
+    int dg = static_cast<int>((a >> 8) & 0xff) - static_cast<int>((b >> 8) & 0xff);
+    int dr = static_cast<int>((a >> 16) & 0xff) - static_cast<int>((b >> 16) & 0xff);
+    return std::abs(db) + std::abs(dg) + std::abs(dr);
+}
+
+static int AverageFrameDiff(const std::vector<BYTE> &a, const std::vector<BYTE> &b, int w, int h) {
+    int xStep = std::max(1, w / 32);
+    int yStep = std::max(1, h / 32);
+    long long diff = 0;
+    int samples = 0;
+    for (int y = 0; y < h; y += yStep) {
+        for (int x = 0; x < w; x += xStep) {
+            diff += PixelAbsDiff(PixelAt(a, w, x, y), PixelAt(b, w, x, y));
+            ++samples;
+        }
+    }
+    return samples > 0 ? static_cast<int>(diff / samples) : 255;
+}
+
+static int OverlapError(const std::vector<BYTE> &prev, const std::vector<BYTE> &next, int w, int h, int overlap) {
+    int xStep = std::max(1, w / 40);
+    int yStep = std::max(1, overlap / 40);
+    long long diff = 0;
+    int samples = 0;
+    for (int y = 0; y < overlap; y += yStep) {
+        int prevY = h - overlap + y;
+        for (int x = 0; x < w; x += xStep) {
+            diff += PixelAbsDiff(PixelAt(prev, w, x, prevY), PixelAt(next, w, x, y));
+            ++samples;
+        }
+    }
+    return samples > 0 ? static_cast<int>(diff / samples) : 255;
+}
+
+static int EstimateOverlap(const std::vector<BYTE> &prev, const std::vector<BYTE> &next, int w, int h) {
+    if (w <= 0 || h <= 1) {
+        return 0;
+    }
+
+    int minOverlap = std::min(h - 1, std::max(24, h / 8));
+    int maxOverlap = std::min(h - 1, std::max(minOverlap, h * 9 / 10));
+    int step = std::max(1, h / 80);
+    int bestOverlap = minOverlap;
+    int bestError = 255 * 3;
+
+    for (int overlap = minOverlap; overlap <= maxOverlap; overlap += step) {
+        int error = OverlapError(prev, next, w, h, overlap);
+        if (error < bestError) {
+            bestError = error;
+            bestOverlap = overlap;
+        }
+    }
+
+    int refineStart = std::max(minOverlap, bestOverlap - step);
+    int refineEnd = std::min(maxOverlap, bestOverlap + step);
+    for (int overlap = refineStart; overlap <= refineEnd; ++overlap) {
+        int error = OverlapError(prev, next, w, h, overlap);
+        if (error < bestError) {
+            bestError = error;
+            bestOverlap = overlap;
+        }
+    }
+
+    return bestError <= 45 ? bestOverlap : 0;
+}
+
+static HBITMAP StitchLongFrames(const std::vector<LongFrame> &frames, int w, int *outH) {
+    int totalH = 0;
+    for (const LongFrame &frame : frames) {
+        totalH += frame.copyH;
+    }
+    if (frames.empty() || w <= 0 || totalH <= 0) {
+        return NULL;
+    }
+
+    HDC screen = GetDC(NULL);
+    HDC source = CreateCompatibleDC(screen);
+    HDC dest = CreateCompatibleDC(screen);
+    HBITMAP output = CreateCompatibleBitmap(screen, w, totalH);
+    if (!source || !dest || !output) {
+        if (output) {
+            DeleteObject(output);
+        }
+        if (source) {
+            DeleteDC(source);
+        }
+        if (dest) {
+            DeleteDC(dest);
+        }
+        ReleaseDC(NULL, screen);
+        return NULL;
+    }
+
+    HGDIOBJ oldDest = SelectObject(dest, output);
+    int y = 0;
+    for (const LongFrame &frame : frames) {
+        HGDIOBJ oldSource = SelectObject(source, frame.bitmap);
+        BitBlt(dest, 0, y, w, frame.copyH, source, 0, frame.sourceY, SRCCOPY);
+        SelectObject(source, oldSource);
+        y += frame.copyH;
+    }
+
+    SelectObject(dest, oldDest);
+    DeleteDC(source);
+    DeleteDC(dest);
+    ReleaseDC(NULL, screen);
+    if (outH) {
+        *outH = totalH;
+    }
+    return output;
+}
+
 static void FillRectColor(HDC dc, const RECT &rect, COLORREF color) {
     HBRUSH brush = CreateSolidBrush(color);
     FillRect(dc, &rect, brush);
@@ -741,14 +924,29 @@ static bool RunSelectionOverlay(const ScreenCapture &capture, RECT *selection) {
 
 static bool PointInImage(EditorState *state, int x, int y) {
     return x >= state->imageX && y >= state->imageY &&
-           x < state->imageX + state->w && y < state->imageY + state->h;
+           x < state->imageX + state->w && y < state->imageY + state->viewH;
 }
 
 static POINT ToImagePoint(EditorState *state, int x, int y) {
     POINT point;
     point.x = Clamp(x - state->imageX, 0, state->w - 1);
-    point.y = Clamp(y - state->imageY, 0, state->h - 1);
+    point.y = Clamp(y - state->imageY + state->scrollY, 0, state->h - 1);
     return point;
+}
+
+static bool ScrollEditor(EditorState *state, HWND hwnd, int delta) {
+    if (!state || state->h <= state->viewH) {
+        return false;
+    }
+
+    int old = state->scrollY;
+    int maxScroll = std::max(0, state->h - state->viewH);
+    state->scrollY = Clamp(state->scrollY + delta, 0, maxScroll);
+    if (state->scrollY != old) {
+        InvalidateRect(hwnd, NULL, FALSE);
+        return true;
+    }
+    return false;
 }
 
 static void DrawToolbarIcon(HDC dc, Action action, const RECT &button, bool active) {
@@ -1020,11 +1218,12 @@ static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
 
     HDC source = CreateCompatibleDC(dc);
     HGDIOBJ old = SelectObject(source, state->shot);
-    BitBlt(dc, state->imageX, state->imageY, state->w, state->h, source, 0, 0, SRCCOPY);
+    int visibleH = std::min(state->viewH, state->h - state->scrollY);
+    BitBlt(dc, state->imageX, state->imageY, state->w, visibleH, source, 0, state->scrollY, SRCCOPY);
     SelectObject(source, old);
     DeleteDC(source);
 
-    RECT imageBorder = {state->imageX, state->imageY, state->imageX + state->w, state->imageY + state->h};
+    RECT imageBorder = {state->imageX, state->imageY, state->imageX + state->w, state->imageY + state->viewH};
     HPEN border = CreatePen(PS_SOLID, 1, RGB(58, 74, 80));
     HGDIOBJ oldPen = SelectObject(dc, border);
     HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
@@ -1033,11 +1232,13 @@ static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
     SelectObject(dc, oldPen);
     DeleteObject(border);
 
+    int savedClip = SaveDC(dc);
+    IntersectClipRect(dc, state->imageX, state->imageY, state->imageX + state->w, state->imageY + state->viewH);
     for (const Annotation &op : state->ops) {
-        DrawAnnotation(dc, op, state->imageX, state->imageY, state->w, state->h);
+        DrawAnnotation(dc, op, state->imageX, state->imageY - state->scrollY, state->w, state->h);
     }
     if (state->drawing) {
-        DrawAnnotation(dc, state->preview, state->imageX, state->imageY, state->w, state->h);
+        DrawAnnotation(dc, state->preview, state->imageX, state->imageY - state->scrollY, state->w, state->h);
     }
     if (state->textEntry) {
         Annotation text;
@@ -1045,7 +1246,26 @@ static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
         text.a = state->textPoint;
         text.b = state->textPoint;
         text.text = state->textBuffer + L"_";
-        DrawAnnotation(dc, text, state->imageX, state->imageY, state->w, state->h);
+        DrawAnnotation(dc, text, state->imageX, state->imageY - state->scrollY, state->w, state->h);
+    }
+    RestoreDC(dc, savedClip);
+
+    if (state->h > state->viewH && StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        int trackX = state->imageX + state->w - 8;
+        int trackTop = state->imageY + 8;
+        int trackH = std::max(24, state->viewH - 16);
+        float thumbH = std::max(24.0f, static_cast<float>(trackH) * static_cast<float>(state->viewH) / static_cast<float>(state->h));
+        float maxThumbTravel = static_cast<float>(trackH) - thumbH;
+        float thumbY = static_cast<float>(trackTop);
+        if (state->h > state->viewH) {
+            thumbY += maxThumbTravel * static_cast<float>(state->scrollY) / static_cast<float>(state->h - state->viewH);
+        }
+        SolidBrush track(Color(110, 8, 12, 14));
+        SolidBrush thumb(Color(210, 23, 198, 163));
+        graphics.FillRectangle(&track, static_cast<float>(trackX), static_cast<float>(trackTop), 4.0f, static_cast<float>(trackH));
+        graphics.FillRectangle(&thumb, static_cast<float>(trackX - 1), thumbY, 6.0f, thumbH);
     }
 
     DrawToolbar(state, dc);
@@ -1196,6 +1416,22 @@ static LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             DestroyWindow(hwnd);
             return 0;
         }
+        if (wParam == VK_NEXT) {
+            ScrollEditor(state, hwnd, std::max(80, state->viewH - 80));
+            return 0;
+        }
+        if (wParam == VK_PRIOR) {
+            ScrollEditor(state, hwnd, -std::max(80, state->viewH - 80));
+            return 0;
+        }
+        if (wParam == VK_HOME) {
+            ScrollEditor(state, hwnd, -state->h);
+            return 0;
+        }
+        if (wParam == VK_END) {
+            ScrollEditor(state, hwnd, state->h);
+            return 0;
+        }
         if (state->textEntry) {
             if (wParam == VK_RETURN) {
                 CommitText(state);
@@ -1236,6 +1472,11 @@ static LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
+            if (y < kToolbarH) {
+                ReleaseCapture();
+                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                return 0;
+            }
             if (!PointInImage(state, x, y)) {
                 return 0;
             }
@@ -1262,6 +1503,14 @@ static LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
+    case WM_MOUSEWHEEL:
+        if (state) {
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            if (ScrollEditor(state, hwnd, delta > 0 ? -240 : 240)) {
+                return 0;
+            }
+        }
+        break;
     case WM_LBUTTONUP:
         if (state && state->drawing) {
             ReleaseCapture();
@@ -1295,15 +1544,17 @@ static void RunEditorModal(HBITMAP shot, int w, int h) {
     state.shot = shot;
     state.w = w;
     state.h = h;
-    state.winW = std::max(w, ToolbarWidth());
-    state.winH = h + kToolbarH;
-    state.imageX = (state.winW - w) / 2;
-    state.imageY = kToolbarH;
 
     int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    int maxWinH = std::max(kToolbarH + 160, vh - kEditorMargin);
+    state.viewH = std::min(h, maxWinH - kToolbarH);
+    state.winW = std::max(w, ToolbarWidth());
+    state.winH = state.viewH + kToolbarH;
+    state.imageX = (state.winW - w) / 2;
+    state.imageY = kToolbarH;
     int x = vx + std::max(0, (vw - state.winW) / 2);
     int y = vy + std::max(0, (vh - state.winH) / 2);
 
@@ -1346,6 +1597,129 @@ static void RunCapture() {
         }
     }
     DeleteObject(capture.bitmap);
+    g_captureActive = false;
+}
+
+static void SendWheelDownAt(POINT point, HWND target) {
+    HWND root = target ? GetAncestor(target, GA_ROOT) : NULL;
+    if (root) {
+        SetForegroundWindow(root);
+    }
+    SetCursorPos(point.x, point.y);
+    Sleep(80);
+
+    INPUT input = {};
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+    input.mi.mouseData = static_cast<DWORD>(-WHEEL_DELTA * kLongCaptureWheelNotches);
+    SendInput(1, &input, sizeof(input));
+    Sleep(kLongCaptureScrollDelayMs);
+}
+
+static HBITMAP CaptureLongSelection(const RECT &selection, int *outH) {
+    int w = RectWidth(selection);
+    int h = RectHeight(selection);
+    if (w <= 16 || h <= 16) {
+        return NULL;
+    }
+
+    POINT center = {selection.left + w / 2, selection.top + h / 2};
+    HWND target = WindowFromPoint(center);
+    POINT oldCursor;
+    GetCursorPos(&oldCursor);
+
+    std::vector<LongFrame> frames;
+    std::vector<BYTE> prevPixels;
+    int totalH = 0;
+
+    HBITMAP first = CaptureScreenRect(selection);
+    if (!first || !ReadBitmapPixels(first, w, h, &prevPixels)) {
+        if (first) {
+            DeleteObject(first);
+        }
+        SetCursorPos(oldCursor.x, oldCursor.y);
+        return NULL;
+    }
+    frames.push_back({first, 0, h});
+    totalH = h;
+
+    for (int i = 1; i < kLongCaptureMaxFrames && totalH < kLongCaptureMaxHeight; ++i) {
+        SendWheelDownAt(center, target);
+        HBITMAP next = CaptureScreenRect(selection);
+        std::vector<BYTE> nextPixels;
+        if (!next || !ReadBitmapPixels(next, w, h, &nextPixels)) {
+            if (next) {
+                DeleteObject(next);
+            }
+            break;
+        }
+
+        if (AverageFrameDiff(prevPixels, nextPixels, w, h) <= 8) {
+            DeleteObject(next);
+            break;
+        }
+
+        int overlap = EstimateOverlap(prevPixels, nextPixels, w, h);
+        int copyH = h - overlap;
+        if (copyH < 32) {
+            DeleteObject(next);
+            break;
+        }
+        if (totalH + copyH > kLongCaptureMaxHeight) {
+            copyH = kLongCaptureMaxHeight - totalH;
+        }
+        if (copyH <= 0) {
+            DeleteObject(next);
+            break;
+        }
+
+        frames.push_back({next, overlap, copyH});
+        totalH += copyH;
+        prevPixels.swap(nextPixels);
+    }
+
+    SetCursorPos(oldCursor.x, oldCursor.y);
+
+    HBITMAP stitched = StitchLongFrames(frames, w, outH);
+    for (LongFrame &frame : frames) {
+        DeleteObject(frame.bitmap);
+    }
+    return stitched;
+}
+
+static void RunLongCapture() {
+    if (g_captureActive) {
+        return;
+    }
+
+    g_captureActive = true;
+    NotifyAction(g_hiddenWindow, L"Long capture", L"Drag the visible scroll area. The app will scroll and stitch it.");
+    ScreenCapture capture = CaptureVirtualScreen();
+    if (!capture.bitmap) {
+        g_captureActive = false;
+        return;
+    }
+
+    RECT selection;
+    if (RunSelectionOverlay(capture, &selection)) {
+        DeleteObject(capture.bitmap);
+        capture.bitmap = NULL;
+        Sleep(120);
+
+        int longH = 0;
+        HBITMAP shot = CaptureLongSelection(selection, &longH);
+        if (shot) {
+            RunEditorModal(shot, RectWidth(selection), longH);
+            DeleteObject(shot);
+        } else {
+            NotifyAction(g_hiddenWindow, L"Long capture failed",
+                         L"Could not stitch this area. Try a taller visible content area.");
+        }
+    }
+
+    if (capture.bitmap) {
+        DeleteObject(capture.bitmap);
+    }
     g_captureActive = false;
 }
 
@@ -1624,6 +1998,7 @@ static void ShowTrayMenu(HWND hwnd) {
     HMENU menu = CreatePopupMenu();
     std::wstring capture = L"Capture (" + HotkeyText(g_settings) + L")";
     AppendMenuW(menu, MF_STRING, kMenuCapture, capture.c_str());
+    AppendMenuW(menu, MF_STRING, kMenuLongCapture, L"Long Capture...");
     AppendMenuW(menu, MF_STRING, kMenuSettings, L"Settings...");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, kMenuExit, L"Exit");
@@ -1649,6 +2024,8 @@ static LRESULT CALLBACK HiddenProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
     case WM_COMMAND:
         if (LOWORD(wParam) == kMenuCapture) {
             RunCapture();
+        } else if (LOWORD(wParam) == kMenuLongCapture) {
+            RunLongCapture();
         } else if (LOWORD(wParam) == kMenuSettings) {
             ShowSettingsWindow();
         } else if (LOWORD(wParam) == kMenuExit) {
@@ -1740,11 +2117,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     } else if (argc > 1 && wcscmp(argv[1], L"--once") == 0) {
         RunCapture();
         status = 0;
+    } else if (argc > 1 && wcscmp(argv[1], L"--long") == 0) {
+        RunLongCapture();
+        status = 0;
     } else if (argc == 1) {
         status = RunDaemon();
     } else {
         MessageBoxW(NULL,
-                    L"Usage:\nModernScreenshot.exe\nModernScreenshot.exe --once\nModernScreenshot.exe --self-test PATH",
+                    L"Usage:\nModernScreenshot.exe\nModernScreenshot.exe --once\nModernScreenshot.exe --long\nModernScreenshot.exe --self-test PATH",
                     L"ModernScreenshot", MB_OK);
         status = 2;
     }

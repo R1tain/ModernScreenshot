@@ -15,10 +15,11 @@ The implementation is intentionally small:
 ## Features
 
 - `Ctrl+1` global hotkey
-- Windows tray icon with Capture, Settings, and Exit
+- Windows tray icon with Capture, Long Capture, Settings, and Exit
 - configurable Windows hotkey stored in `%APPDATA%\ModernScreenshot\settings.ini`
 - hotkey conflict warning with a settings entry point
 - region selection overlay
+- Windows long screenshot mode for scrollable content
 - editor toolbar: blur, arrow, rectangle, text, undo, copy, save
 - mosaic blur for sensitive content
 - `Ctrl+Z`, `Ctrl+C`, and `Ctrl+S` in the editor
@@ -59,7 +60,7 @@ Windows:
 .\build\windows\ModernScreenshot.exe
 ```
 
-On Windows, the app stays in the system tray. Use the tray menu to capture, open settings, or exit. If `Ctrl+1` is already used by another app, open Settings from the tray menu and choose another hotkey.
+On Windows, the app stays in the system tray. Use the tray menu to capture, long capture, open settings, or exit. If `Ctrl+1` is already used by another app, open Settings from the tray menu and choose another hotkey.
 
 Press the configured hotkey, drag a region, and release the mouse. The editor opens on the captured region:
 
@@ -67,6 +68,8 @@ Press the configured hotkey, drag a region, and release the mouse. The editor op
 - `Undo` removes the last annotation
 - `Copy` writes the image to the clipboard
 - `Save` writes a PNG file to:
+- drag the empty toolbar area to move the editor window
+- use the mouse wheel, `PageUp`, `PageDown`, `Home`, or `End` to browse tall screenshots
 
 ```text
 ~/Pictures/Screenshots/
@@ -83,6 +86,14 @@ For a one-shot capture:
 ```sh
 ./build/modern-screenshot --once
 ```
+
+For a Windows long screenshot, choose `Long Capture...` from the tray menu or run:
+
+```powershell
+.\build\windows\ModernScreenshot.exe --long
+```
+
+Drag the visible scrollable content area. The app captures the first frame, scrolls downward, stitches up to 8 frames, and opens the result in the editor. Long capture works best when the selected area is inside a window that responds to the mouse wheel.
 
 For an automated editor export test:
 
@@ -132,6 +143,6 @@ You can also run the `release` workflow manually from the Actions tab and provid
 
 This tool targets X11. On Wayland sessions, global hotkeys and root-window capture are intentionally restricted by the compositor, so use an X11 session or XWayland environment that exposes the root window.
 
-The 5 MB target applies to the idle daemon. During copy, X11 clients may request the PNG payload from the clipboard, which can temporarily allocate memory proportional to the exported file size.
+The 5 MB target applies to the idle daemon. During copy, export, or long screenshot stitching, the app may temporarily allocate memory proportional to the captured image size.
 
 Useful next features would be numbered step markers, adjustable stroke width, color swatches, pinned screenshots, and a delayed full-screen capture mode.
