@@ -1,10 +1,11 @@
 # ModernScreenshot
 
-ModernScreenshot is a lightweight Linux/X11 screenshot daemon with a custom-drawn selection UI, a PixPin/Snip-style edit toolbar, and the global hotkey `Ctrl+1`.
+ModernScreenshot is a lightweight screenshot daemon with a custom-drawn selection UI, a PixPin/Snip-style edit toolbar, and the global hotkey `Ctrl+1`.
 
 The implementation is intentionally small:
 
-- C11, Xlib, and Xrender only
+- Linux: C11, Xlib, and Xrender only
+- Windows: Win32/GDI/GDI+ only
 - no Electron, Qt, GTK, libpng, zlib, or tray runtime
 - idle RSS target below 5 MB
 - screenshot capture uses a fixed tile buffer instead of storing a full-screen image in memory
@@ -22,6 +23,8 @@ The implementation is intentionally small:
 
 ## Build
 
+Linux:
+
 ```sh
 sudo apt-get install build-essential pkg-config libx11-dev libxrender-dev
 make release
@@ -29,21 +32,45 @@ make release
 
 The binary is written to `build/modern-screenshot`.
 
+Windows:
+
+```powershell
+.\scripts\build-windows.ps1 -Configuration Release
+```
+
+The executable is written to `build\windows\ModernScreenshot.exe`, and the zip package is written to `build\windows\ModernScreenshot-windows-x64.zip`.
+
+GitHub Actions also publishes the same zip as the `ModernScreenshot-windows-x64` artifact on every push.
+
 ## Run
+
+Linux:
 
 ```sh
 ./build/modern-screenshot
+```
+
+Windows:
+
+```powershell
+.\build\windows\ModernScreenshot.exe
 ```
 
 Press `Ctrl+1`, drag a region, and release the mouse. The editor opens on the captured region:
 
 - `Blur`, `->`, `Box`, and `Text` choose the active tool
 - `Undo` removes the last annotation
-- `Copy` writes a PNG to the X11 clipboard
+- `Copy` writes the image to the clipboard
 - `Save` writes a PNG file to:
 
 ```text
 ~/Pictures/Screenshots/
+```
+
+On Windows, saved files go to:
+
+```text
+%USERPROFILE%\Pictures\Screenshots\
 ```
 
 For a one-shot capture:
