@@ -293,12 +293,28 @@ static RECT ButtonRect(int index) {
     return rect;
 }
 
-static RECT OverlayModeRect(int index) {
+static RECT OverlayModeRect(int captureW, int captureH, int index) {
+    int totalW = 2 * kOverlayModeW + kOverlayModeGap;
+    int startX = (captureW - totalW) / 2;
+    if (startX < 16) startX = 16;
+    int y = captureH - 96;
+    if (y < 16) y = 16;
     RECT rect;
-    rect.left = 16 + index * (kOverlayModeW + kOverlayModeGap);
-    rect.top = 16;
+    rect.left = startX + index * (kOverlayModeW + kOverlayModeGap);
+    rect.top = y;
     rect.right = rect.left + kOverlayModeW;
     rect.bottom = rect.top + kOverlayModeH;
+    return rect;
+}
+
+static RECT OverlayHintRect(int captureW, int captureH) {
+    int w = 360;
+    int h = 36;
+    int x = (captureW - w) / 2;
+    if (x < 16) x = 16;
+    int y = captureH - 96 - h - 14;
+    if (y < 16) y = 16;
+    RECT rect = {x, y, x + w, y + h};
     return rect;
 }
 
@@ -315,14 +331,14 @@ static HWND RootWindow(HWND hwnd) {
     return hwnd ? GetAncestor(hwnd, GA_ROOT) : NULL;
 }
 
-static CaptureKind OverlayModeAt(int x, int y, bool *hit) {
-    RECT region = OverlayModeRect(0);
+static CaptureKind OverlayModeAt(int captureW, int captureH, int x, int y, bool *hit) {
+    RECT region = OverlayModeRect(captureW, captureH, 0);
     if (PointInRect(x, y, region)) {
         *hit = true;
         return CaptureRegion;
     }
 
-    RECT longRegion = OverlayModeRect(1);
+    RECT longRegion = OverlayModeRect(captureW, captureH, 1);
     if (PointInRect(x, y, longRegion)) {
         *hit = true;
         return CaptureLongRegion;
@@ -924,10 +940,43 @@ static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offset
     }
 
     if (state->showModeButtons) {
-        DrawOverlayModeButton(dc, OverlayModeRect(0), L"Screenshot", state->kind == CaptureRegion, offsetX, offsetY);
-        DrawOverlayModeButton(dc, OverlayModeRect(1), L"Long", state->kind == CaptureLongRegion, offsetX, offsetY);
-        DrawTextLabel(dc, state->kind == CaptureLongRegion ? L"Drag scroll area for auto capture" : L"Drag to capture region",
-                      16 - offsetX, 58 - offsetY, RGB(245, 251, 248));
+        int cw = state->capture.w;
+        int ch = state->capture.h;
+        RECT hintBg = OverlayHintRect(cw, ch);
+        if (StartGdiplus()) {
+            Graphics graphics(dc);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            GraphicsPath hintPath;
+            BuildRoundedRectPath(&hintPath, static_cast<float>(hintBg.left - offsetX),
+                                 static_cast<float>(hintBg.top - offsetY),
+                                 static_cast<float>(RectWidth(hintBg)),
+                                 static_cast<float>(RectHeight(hintBg)), 10.0f);
+            SolidBrush pillFill(Color(220, 16, 21, 24));
+            Pen pillBorder(Color(170, 64, 80, 86), 1.0f);
+            graphics.FillPath(&pillFill, &hintPath);
+            graphics.DrawPath(&pillBorder, &hintPath);
+            const wchar_t *hint = state->kind == CaptureLongRegion
+                                      ? L"Drag the scrollable area, then release to start auto capture"
+                                      : L"Drag any region. Press Tab to switch to long capture.";
+            Font hintFont(L"Segoe UI", 12.0f, FontStyleRegular, UnitPixel);
+            SolidBrush hintBrush(Color(255, 230, 240, 240));
+            Gdiplus::StringFormat fmt;
+            fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+            fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            RectF hintRect(static_cast<float>(hintBg.left - offsetX),
+                           static_cast<float>(hintBg.top - offsetY),
+                           static_cast<float>(RectWidth(hintBg)),
+                           static_cast<float>(RectHeight(hintBg)));
+            graphics.DrawString(hint, -1, &hintFont, hintRect, &fmt, &hintBrush);
+        } else {
+            FillRectColor(dc, {hintBg.left - offsetX, hintBg.top - offsetY,
+                               hintBg.right - offsetX, hintBg.bottom - offsetY},
+                          RGB(16, 21, 24));
+        }
+        DrawOverlayModeButton(dc, OverlayModeRect(cw, ch, 0), L"Region",
+                              state->kind == CaptureRegion, offsetX, offsetY);
+        DrawOverlayModeButton(dc, OverlayModeRect(cw, ch, 1), L"Long capture",
+                              state->kind == CaptureLongRegion, offsetX, offsetY);
     }
 
     if (state->dragging) {
@@ -1072,10 +1121,19 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
         SetCursor(LoadCursor(NULL, IDC_CROSS));
         return TRUE;
     case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE && state) {
+        if (!state) {
+            return 0;
+        }
+        if (wParam == VK_ESCAPE) {
             state->cancelled = true;
             state->done = true;
             DestroyWindow(hwnd);
+            return 0;
+        }
+        if (wParam == VK_TAB && state->showModeButtons) {
+            state->kind = state->kind == CaptureRegion ? CaptureLongRegion : CaptureRegion;
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
         }
         return 0;
     case WM_LBUTTONDOWN:
@@ -1084,7 +1142,7 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
             int y = GET_Y_LPARAM(lParam);
             if (state->showModeButtons) {
                 bool hitMode = false;
-                CaptureKind mode = OverlayModeAt(x, y, &hitMode);
+                CaptureKind mode = OverlayModeAt(state->capture.w, state->capture.h, x, y, &hitMode);
                 if (hitMode) {
                     state->kind = mode;
                     InvalidateRect(hwnd, NULL, FALSE);
