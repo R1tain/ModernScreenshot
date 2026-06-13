@@ -15,5 +15,7 @@ jobs:
         run: make release
       - name: Smoke test
         run: make smoke
+      - name: Editor export test
+        run: xvfb-run -a ./build/modern-screenshot --self-test /tmp/modern-screenshot-editor-test.png
       - name: Memory check
         run: xvfb-run -a make memory-check

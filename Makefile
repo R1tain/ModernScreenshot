@@ -22,7 +22,7 @@ BIN := build/$(APP)
 all: $(BIN)
 
 $(BIN): $(SRC) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(X11_LIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(X11_LIBS) -lm
 
 build:
 	mkdir -p $@

@@ -5,8 +5,10 @@
 #include <X11/cursorfont.h>
 #include <X11/extensions/Xrender.h>
 #include <X11/keysym.h>
+#include <X11/Xatom.h>
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,6 +24,12 @@
 
 #define HOTKEY_KEYS "Ctrl+1"
 #define MAX_CAPTURE_BUFFER (512 * 1024)
+#define MAX_ANNOTATIONS 160
+#define MAX_TEXT_LEN 128
+#define TOOLBAR_H 52
+#define BUTTON_W 64
+#define BUTTON_H 36
+#define BUTTON_GAP 8
 #define TOAST_MS 1200
 
 typedef struct {
@@ -47,6 +55,22 @@ typedef struct {
     int has_argb;
     XFontStruct *font;
     int hotkey_code;
+    Colormap root_colormap;
+    unsigned long color_bg;
+    unsigned long color_panel;
+    unsigned long color_panel_active;
+    unsigned long color_border;
+    unsigned long color_accent;
+    unsigned long color_accent_2;
+    unsigned long color_text;
+    unsigned long color_muted;
+    Atom atom_clipboard;
+    Atom atom_targets;
+    Atom atom_png;
+    Atom atom_utf8;
+    Atom atom_uri_list;
+    Window clipboard_window;
+    char clipboard_path[PATH_MAX];
 } App;
 
 typedef struct {
@@ -66,6 +90,64 @@ typedef struct {
     uint32_t adler;
     int first_block;
 } PngWriter;
+
+typedef enum {
+    TOOL_BLUR,
+    TOOL_ARROW,
+    TOOL_RECT,
+    TOOL_TEXT
+} Tool;
+
+typedef enum {
+    ACTION_NONE,
+    ACTION_TOOL_BLUR,
+    ACTION_TOOL_ARROW,
+    ACTION_TOOL_RECT,
+    ACTION_TOOL_TEXT,
+    ACTION_UNDO,
+    ACTION_COPY,
+    ACTION_SAVE
+} ButtonAction;
+
+typedef struct {
+    Tool tool;
+    int x1;
+    int y1;
+    int x2;
+    int y2;
+    char text[MAX_TEXT_LEN];
+} Annotation;
+
+typedef struct {
+    App *app;
+    Window window;
+    Pixmap shot;
+    Rect rect;
+    Tool active_tool;
+    Annotation ops[MAX_ANNOTATIONS];
+    int op_count;
+    int drawing;
+    Annotation preview;
+    int text_entry;
+    int text_x;
+    int text_y;
+    char text_buffer[MAX_TEXT_LEN];
+    int text_len;
+    int win_w;
+    int win_h;
+    int image_x;
+    int image_y;
+    int done;
+    int saved;
+    int copied;
+    char saved_display_path[PATH_MAX];
+} Editor;
+
+typedef struct {
+    ButtonAction action;
+    Tool tool;
+    const char *label;
+} ButtonSpec;
 
 static volatile sig_atomic_t keep_running = 1;
 static int grab_failed = 0;
@@ -116,6 +198,19 @@ static Rect normalize_rect(int x1, int y1, int x2, int y2, int max_w, int max_h)
         rect.h = max_h - rect.y;
     }
     return rect;
+}
+
+static Rect annotation_rect(const Annotation *annotation, int max_w, int max_h) {
+    return normalize_rect(annotation->x1, annotation->y1, annotation->x2, annotation->y2, max_w, max_h);
+}
+
+static unsigned long alloc_named_color(App *app, const char *name, unsigned long fallback) {
+    XColor color;
+    if (XParseColor(app->display, app->root_colormap, name, &color) &&
+        XAllocColor(app->display, app->root_colormap, &color)) {
+        return color.pixel;
+    }
+    return fallback;
 }
 
 static int mkdir_recursive(const char *path) {
@@ -418,9 +513,10 @@ static int app_init(App *app) {
     app->root_h = DisplayHeight(app->display, app->screen);
     app->root_visual = DefaultVisual(app->display, app->screen);
     app->root_depth = DefaultDepth(app->display, app->screen);
+    app->root_colormap = DefaultColormap(app->display, app->screen);
     app->overlay_visual = app->root_visual;
     app->overlay_depth = app->root_depth;
-    app->overlay_colormap = DefaultColormap(app->display, app->screen);
+    app->overlay_colormap = app->root_colormap;
     app->hotkey_code = XKeysymToKeycode(app->display, XK_1);
 
     int event_base = 0;
@@ -435,6 +531,22 @@ static int app_init(App *app) {
     if (!app->font) {
         app->font = XLoadQueryFont(app->display, "fixed");
     }
+
+    app->color_bg = alloc_named_color(app, "#101418", BlackPixel(app->display, app->screen));
+    app->color_panel = alloc_named_color(app, "#161d22", BlackPixel(app->display, app->screen));
+    app->color_panel_active = alloc_named_color(app, "#213138", BlackPixel(app->display, app->screen));
+    app->color_border = alloc_named_color(app, "#3b4a50", WhitePixel(app->display, app->screen));
+    app->color_accent = alloc_named_color(app, "#17c6a3", WhitePixel(app->display, app->screen));
+    app->color_accent_2 = alloc_named_color(app, "#ffcf5a", WhitePixel(app->display, app->screen));
+    app->color_text = alloc_named_color(app, "#f5fbf8", WhitePixel(app->display, app->screen));
+    app->color_muted = alloc_named_color(app, "#94a3a2", WhitePixel(app->display, app->screen));
+
+    app->atom_clipboard = XInternAtom(app->display, "CLIPBOARD", False);
+    app->atom_targets = XInternAtom(app->display, "TARGETS", False);
+    app->atom_png = XInternAtom(app->display, "image/png", False);
+    app->atom_utf8 = XInternAtom(app->display, "UTF8_STRING", False);
+    app->atom_uri_list = XInternAtom(app->display, "text/uri-list", False);
+    app->clipboard_window = XCreateSimpleWindow(app->display, app->root, 0, 0, 1, 1, 0, 0, 0);
     return 0;
 }
 
@@ -447,6 +559,9 @@ static void app_destroy(App *app) {
     }
     if (app->has_argb && app->overlay_colormap) {
         XFreeColormap(app->display, app->overlay_colormap);
+    }
+    if (app->clipboard_window) {
+        XDestroyWindow(app->display, app->clipboard_window);
     }
     XCloseDisplay(app->display);
 }
@@ -463,6 +578,16 @@ static void draw_label(App *app, Drawable drawable, const char *label, int x, in
         XSetFont(app->display, gc, app->font->fid);
     }
     XSetForeground(app->display, gc, app->has_argb ? 0xffffffffUL : WhitePixel(app->display, app->screen));
+    XDrawString(app->display, drawable, gc, x, y, label, (int)strlen(label));
+    XFreeGC(app->display, gc);
+}
+
+static void draw_label_color(App *app, Drawable drawable, const char *label, int x, int y, unsigned long color) {
+    GC gc = XCreateGC(app->display, drawable, 0, NULL);
+    if (app->font) {
+        XSetFont(app->display, gc, app->font->fid);
+    }
+    XSetForeground(app->display, gc, color);
     XDrawString(app->display, drawable, gc, x, y, label, (int)strlen(label));
     XFreeGC(app->display, gc);
 }
@@ -569,7 +694,7 @@ static void draw_overlay(App *app, Window overlay, Rect selection, int has_selec
     }
 }
 
-static int write_capture_png(App *app, Rect rect, const char *path) {
+static int write_drawable_png(App *app, Drawable source, Rect rect, const char *path) {
     PngWriter writer;
     PixelFormat format = pixel_format_from_visual(app->root_visual);
 
@@ -613,7 +738,7 @@ static int write_capture_png(App *app, Rect rect, const char *path) {
 
         image->height = rows;
         memset(image->data, 0, (size_t)image->bytes_per_line * (size_t)rows_per_tile);
-        if (!XGetSubImage(app->display, app->root, rect.x, rect.y + y, (unsigned int)rect.w, (unsigned int)rows,
+        if (!XGetSubImage(app->display, source, rect.x, rect.y + y, (unsigned int)rect.w, (unsigned int)rows,
                           AllPlanes, ZPixmap, image, 0, 0)) {
             XDestroyImage(image);
             free(png_row);
@@ -644,6 +769,715 @@ static int write_capture_png(App *app, Rect rect, const char *path) {
     XDestroyImage(image);
     free(png_row);
     return png_finish(&writer);
+}
+
+static int write_capture_png(App *app, Rect rect, const char *path) {
+    return write_drawable_png(app, app->root, rect, path);
+}
+
+static const ButtonSpec editor_buttons[] = {
+    {ACTION_TOOL_BLUR, TOOL_BLUR, "Blur"},
+    {ACTION_TOOL_ARROW, TOOL_ARROW, "->"},
+    {ACTION_TOOL_RECT, TOOL_RECT, "Box"},
+    {ACTION_TOOL_TEXT, TOOL_TEXT, "Text"},
+    {ACTION_UNDO, TOOL_BLUR, "Undo"},
+    {ACTION_COPY, TOOL_BLUR, "Copy"},
+    {ACTION_SAVE, TOOL_BLUR, "Save"},
+};
+
+static int editor_button_count(void) {
+    return (int)(sizeof(editor_buttons) / sizeof(editor_buttons[0]));
+}
+
+static int editor_toolbar_width(void) {
+    return 24 + editor_button_count() * BUTTON_W + (editor_button_count() - 1) * BUTTON_GAP;
+}
+
+static Rect editor_button_rect(int index) {
+    Rect rect;
+    rect.x = 12 + index * (BUTTON_W + BUTTON_GAP);
+    rect.y = 8;
+    rect.w = BUTTON_W;
+    rect.h = BUTTON_H;
+    return rect;
+}
+
+static int editor_point_in_rect(int x, int y, Rect rect) {
+    return x >= rect.x && y >= rect.y && x < rect.x + rect.w && y < rect.y + rect.h;
+}
+
+static int editor_button_at(int x, int y, Tool *tool) {
+    for (int i = 0; i < editor_button_count(); i++) {
+        if (editor_point_in_rect(x, y, editor_button_rect(i))) {
+            *tool = editor_buttons[i].tool;
+            return editor_buttons[i].action;
+        }
+    }
+    return ACTION_NONE;
+}
+
+static int editor_image_x(Editor *editor, int window_x) {
+    return window_x - editor->image_x;
+}
+
+static int editor_image_y(Editor *editor, int window_y) {
+    return window_y - editor->image_y;
+}
+
+static int editor_point_in_image(Editor *editor, int x, int y) {
+    return x >= editor->image_x && y >= editor->image_y &&
+           x < editor->image_x + editor->rect.w && y < editor->image_y + editor->rect.h;
+}
+
+static void editor_draw_button(Editor *editor, Drawable drawable, int index) {
+    App *app = editor->app;
+    Rect rect = editor_button_rect(index);
+    int is_tool = editor_buttons[index].action == ACTION_TOOL_BLUR ||
+                  editor_buttons[index].action == ACTION_TOOL_ARROW ||
+                  editor_buttons[index].action == ACTION_TOOL_RECT ||
+                  editor_buttons[index].action == ACTION_TOOL_TEXT;
+    int active = is_tool && editor_buttons[index].tool == editor->active_tool;
+
+    GC gc = XCreateGC(app->display, drawable, 0, NULL);
+    XSetForeground(app->display, gc, active ? app->color_panel_active : app->color_panel);
+    XFillRectangle(app->display, drawable, gc, rect.x, rect.y, (unsigned int)rect.w, (unsigned int)rect.h);
+    XSetForeground(app->display, gc, active ? app->color_accent : app->color_border);
+    XDrawRectangle(app->display, drawable, gc, rect.x, rect.y, (unsigned int)(rect.w - 1), (unsigned int)(rect.h - 1));
+    XFreeGC(app->display, gc);
+
+    int text_w = app->font ? XTextWidth(app->font, editor_buttons[index].label,
+                                        (int)strlen(editor_buttons[index].label)) : 28;
+    int text_x = rect.x + (rect.w - text_w) / 2;
+    int text_y = rect.y + 23;
+    draw_label_color(app, drawable, editor_buttons[index].label, text_x, text_y,
+                     active ? app->color_accent : app->color_text);
+}
+
+static void editor_draw_toolbar(Editor *editor, Drawable drawable) {
+    App *app = editor->app;
+    GC gc = XCreateGC(app->display, drawable, 0, NULL);
+    XSetForeground(app->display, gc, app->color_bg);
+    XFillRectangle(app->display, drawable, gc, 0, 0, (unsigned int)editor->win_w, TOOLBAR_H);
+    XSetForeground(app->display, gc, app->color_border);
+    XDrawLine(app->display, drawable, gc, 0, TOOLBAR_H - 1, editor->win_w, TOOLBAR_H - 1);
+    XFreeGC(app->display, gc);
+
+    for (int i = 0; i < editor_button_count(); i++) {
+        editor_draw_button(editor, drawable, i);
+    }
+
+    char info[64];
+    snprintf(info, sizeof(info), "%d x %d", editor->rect.w, editor->rect.h);
+    int info_w = app->font ? XTextWidth(app->font, info, (int)strlen(info)) : 48;
+    if (editor->win_w - info_w > editor_toolbar_width() + 16) {
+        draw_label_color(app, drawable, info, editor->win_w - info_w - 12, 30, app->color_muted);
+    }
+}
+
+static void editor_draw_rect_outline(App *app, Drawable drawable, Rect rect, unsigned long color, int width) {
+    if (rect.w <= 0 || rect.h <= 0) {
+        return;
+    }
+
+    GC gc = XCreateGC(app->display, drawable, 0, NULL);
+    XSetForeground(app->display, gc, color);
+    XSetLineAttributes(app->display, gc, (unsigned int)width, LineSolid, CapRound, JoinRound);
+    XDrawRectangle(app->display, drawable, gc, rect.x, rect.y, (unsigned int)rect.w, (unsigned int)rect.h);
+    XFreeGC(app->display, gc);
+}
+
+static void editor_draw_arrow(App *app, Drawable drawable, int x1, int y1, int x2, int y2, unsigned long color) {
+    double dx = (double)(x2 - x1);
+    double dy = (double)(y2 - y1);
+    double len = sqrt(dx * dx + dy * dy);
+    if (len < 2.0) {
+        return;
+    }
+
+    double angle = atan2(dy, dx);
+    double head_len = 16.0;
+    double head_angle = 0.55;
+    int hx1 = x2 - (int)(cos(angle - head_angle) * head_len);
+    int hy1 = y2 - (int)(sin(angle - head_angle) * head_len);
+    int hx2 = x2 - (int)(cos(angle + head_angle) * head_len);
+    int hy2 = y2 - (int)(sin(angle + head_angle) * head_len);
+
+    GC gc = XCreateGC(app->display, drawable, 0, NULL);
+    XSetForeground(app->display, gc, color);
+    XSetLineAttributes(app->display, gc, 4, LineSolid, CapRound, JoinRound);
+    XDrawLine(app->display, drawable, gc, x1, y1, x2, y2);
+    XDrawLine(app->display, drawable, gc, x2, y2, hx1, hy1);
+    XDrawLine(app->display, drawable, gc, x2, y2, hx2, hy2);
+    XFreeGC(app->display, gc);
+}
+
+static void editor_draw_text(App *app, Drawable drawable, int x, int y, const char *text) {
+    if (!text || !*text) {
+        return;
+    }
+
+    int len = (int)strlen(text);
+    int text_w = app->font ? XTextWidth(app->font, text, len) : len * 8;
+    int text_h = app->font ? app->font->ascent + app->font->descent : 14;
+    GC gc = XCreateGC(app->display, drawable, 0, NULL);
+    XSetForeground(app->display, gc, app->color_bg);
+    XFillRectangle(app->display, drawable, gc, x - 6, y - text_h - 5,
+                   (unsigned int)(text_w + 12), (unsigned int)(text_h + 10));
+    XSetForeground(app->display, gc, app->color_accent_2);
+    if (app->font) {
+        XSetFont(app->display, gc, app->font->fid);
+    }
+    XDrawString(app->display, drawable, gc, x, y, text, len);
+    XFreeGC(app->display, gc);
+}
+
+static void editor_apply_mosaic(App *app, Drawable drawable, Rect rect) {
+    const int block = 12;
+    if (rect.w <= 0 || rect.h <= 0) {
+        return;
+    }
+
+    GC gc = XCreateGC(app->display, drawable, 0, NULL);
+    XSync(app->display, False);
+
+    for (int y = rect.y; y < rect.y + rect.h; y += block) {
+        int bh = rect.y + rect.h - y;
+        if (bh > block) {
+            bh = block;
+        }
+        for (int x = rect.x; x < rect.x + rect.w; x += block) {
+            int bw = rect.x + rect.w - x;
+            if (bw > block) {
+                bw = block;
+            }
+            int sx = x + bw / 2;
+            int sy = y + bh / 2;
+            XImage *sample = XGetImage(app->display, drawable, sx, sy, 1, 1, AllPlanes, ZPixmap);
+            if (!sample) {
+                continue;
+            }
+            XSetForeground(app->display, gc, XGetPixel(sample, 0, 0));
+            XDestroyImage(sample);
+            XFillRectangle(app->display, drawable, gc, x, y, (unsigned int)bw, (unsigned int)bh);
+        }
+    }
+
+    XSetForeground(app->display, gc, app->color_accent_2);
+    XSetLineAttributes(app->display, gc, 2, LineSolid, CapRound, JoinRound);
+    XDrawRectangle(app->display, drawable, gc, rect.x, rect.y, (unsigned int)rect.w, (unsigned int)rect.h);
+    XFreeGC(app->display, gc);
+}
+
+static void editor_draw_annotation(Editor *editor, Drawable drawable, const Annotation *annotation,
+                                   int offset_x, int offset_y) {
+    App *app = editor->app;
+    Annotation shifted = *annotation;
+    shifted.x1 += offset_x;
+    shifted.y1 += offset_y;
+    shifted.x2 += offset_x;
+    shifted.y2 += offset_y;
+
+    if (annotation->tool == TOOL_BLUR) {
+        Rect rect = annotation_rect(&shifted, editor->win_w, editor->win_h);
+        editor_apply_mosaic(app, drawable, rect);
+    } else if (annotation->tool == TOOL_RECT) {
+        Rect rect = annotation_rect(&shifted, editor->win_w, editor->win_h);
+        editor_draw_rect_outline(app, drawable, rect, app->color_accent, 3);
+    } else if (annotation->tool == TOOL_ARROW) {
+        editor_draw_arrow(app, drawable, shifted.x1, shifted.y1, shifted.x2, shifted.y2, app->color_accent_2);
+    } else if (annotation->tool == TOOL_TEXT) {
+        editor_draw_text(app, drawable, shifted.x1, shifted.y1, shifted.text);
+    }
+}
+
+static void editor_redraw(Editor *editor) {
+    App *app = editor->app;
+    GC gc = XCreateGC(app->display, editor->window, 0, NULL);
+    XSetForeground(app->display, gc, app->color_bg);
+    XFillRectangle(app->display, editor->window, gc, 0, 0,
+                   (unsigned int)editor->win_w, (unsigned int)editor->win_h);
+    XCopyArea(app->display, editor->shot, editor->window, gc, 0, 0,
+              (unsigned int)editor->rect.w, (unsigned int)editor->rect.h,
+              editor->image_x, editor->image_y);
+    XSetForeground(app->display, gc, app->color_border);
+    XDrawRectangle(app->display, editor->window, gc, editor->image_x, editor->image_y,
+                   (unsigned int)editor->rect.w, (unsigned int)editor->rect.h);
+    XFreeGC(app->display, gc);
+
+    for (int i = 0; i < editor->op_count; i++) {
+        editor_draw_annotation(editor, editor->window, &editor->ops[i], editor->image_x, editor->image_y);
+    }
+    if (editor->drawing) {
+        editor_draw_annotation(editor, editor->window, &editor->preview, editor->image_x, editor->image_y);
+    }
+    if (editor->text_entry) {
+        char preview[MAX_TEXT_LEN + 2];
+        snprintf(preview, sizeof(preview), "%s_", editor->text_buffer);
+        Annotation text = {TOOL_TEXT, editor->text_x, editor->text_y, editor->text_x, editor->text_y, {0}};
+        size_t preview_len = strlen(preview);
+        if (preview_len >= sizeof(text.text)) {
+            preview_len = sizeof(text.text) - 1;
+        }
+        memcpy(text.text, preview, preview_len);
+        text.text[preview_len] = '\0';
+        editor_draw_annotation(editor, editor->window, &text, editor->image_x, editor->image_y);
+    }
+
+    editor_draw_toolbar(editor, editor->window);
+    XFlush(app->display);
+}
+
+static void editor_add_annotation(Editor *editor, const Annotation *annotation) {
+    if (editor->op_count >= MAX_ANNOTATIONS) {
+        return;
+    }
+    editor->ops[editor->op_count++] = *annotation;
+}
+
+static Pixmap editor_compose_pixmap(Editor *editor) {
+    App *app = editor->app;
+    Pixmap output = XCreatePixmap(app->display, app->root, (unsigned int)editor->rect.w,
+                                  (unsigned int)editor->rect.h, (unsigned int)app->root_depth);
+    if (!output) {
+        return 0;
+    }
+
+    GC gc = XCreateGC(app->display, output, 0, NULL);
+    XCopyArea(app->display, editor->shot, output, gc, 0, 0,
+              (unsigned int)editor->rect.w, (unsigned int)editor->rect.h, 0, 0);
+    XFreeGC(app->display, gc);
+
+    int old_win_w = editor->win_w;
+    int old_win_h = editor->win_h;
+    editor->win_w = editor->rect.w;
+    editor->win_h = editor->rect.h;
+    for (int i = 0; i < editor->op_count; i++) {
+        editor_draw_annotation(editor, output, &editor->ops[i], 0, 0);
+    }
+    editor->win_w = old_win_w;
+    editor->win_h = old_win_h;
+    XSync(app->display, False);
+    return output;
+}
+
+static int editor_export_png(Editor *editor, const char *path) {
+    Pixmap output = editor_compose_pixmap(editor);
+    if (!output) {
+        return -1;
+    }
+
+    Rect rect = {0, 0, editor->rect.w, editor->rect.h};
+    int status = write_drawable_png(editor->app, output, rect, path);
+    XFreePixmap(editor->app->display, output);
+    return status;
+}
+
+static int editor_temp_path(char *path, size_t path_size) {
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) {
+        tmp = "/tmp";
+    }
+    return snprintf(path, path_size, "%s/modern-screenshot-%ld.png", tmp, (long)getpid()) < (int)path_size ? 0 : -1;
+}
+
+static int editor_read_file(const char *path, unsigned char **data, size_t *size) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        return -1;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    long len = ftell(fp);
+    if (len < 0) {
+        fclose(fp);
+        return -1;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return -1;
+    }
+
+    unsigned char *buffer = malloc((size_t)len);
+    if (!buffer && len > 0) {
+        fclose(fp);
+        return -1;
+    }
+    if (len > 0 && fread(buffer, 1, (size_t)len, fp) != (size_t)len) {
+        free(buffer);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    *data = buffer;
+    *size = (size_t)len;
+    return 0;
+}
+
+static void handle_clipboard_request(App *app, XSelectionRequestEvent *request) {
+    XSelectionEvent reply;
+    memset(&reply, 0, sizeof(reply));
+    reply.type = SelectionNotify;
+    reply.display = request->display;
+    reply.requestor = request->requestor;
+    reply.selection = request->selection;
+    reply.target = request->target;
+    reply.time = request->time;
+    reply.property = None;
+
+    Atom property = request->property ? request->property : request->target;
+    if (!app->clipboard_path[0]) {
+        XSendEvent(app->display, request->requestor, False, 0, (XEvent *)&reply);
+        XFlush(app->display);
+        return;
+    }
+
+    if (request->target == app->atom_targets) {
+        Atom targets[] = {app->atom_targets, app->atom_png, app->atom_utf8, app->atom_uri_list, XA_STRING};
+        XChangeProperty(app->display, request->requestor, property, XA_ATOM, 32, PropModeReplace,
+                        (const unsigned char *)targets, (int)(sizeof(targets) / sizeof(targets[0])));
+        reply.property = property;
+    } else if (request->target == app->atom_png) {
+        unsigned char *data = NULL;
+        size_t size = 0;
+        if (editor_read_file(app->clipboard_path, &data, &size) == 0) {
+            XChangeProperty(app->display, request->requestor, property, app->atom_png, 8, PropModeReplace,
+                            data, (int)size);
+            reply.property = property;
+            free(data);
+        }
+    } else if (request->target == app->atom_utf8 || request->target == XA_STRING) {
+        XChangeProperty(app->display, request->requestor, property, request->target, 8, PropModeReplace,
+                        (const unsigned char *)app->clipboard_path, (int)strlen(app->clipboard_path));
+        reply.property = property;
+    } else if (request->target == app->atom_uri_list) {
+        char uri[PATH_MAX + 16];
+        snprintf(uri, sizeof(uri), "file://%s\n", app->clipboard_path);
+        XChangeProperty(app->display, request->requestor, property, app->atom_uri_list, 8, PropModeReplace,
+                        (const unsigned char *)uri, (int)strlen(uri));
+        reply.property = property;
+    }
+
+    XSendEvent(app->display, request->requestor, False, 0, (XEvent *)&reply);
+    XFlush(app->display);
+}
+
+static void handle_clipboard_event(App *app, XEvent *event) {
+    if (event->type == SelectionRequest) {
+        handle_clipboard_request(app, &event->xselectionrequest);
+    } else if (event->type == SelectionClear && event->xselectionclear.selection == app->atom_clipboard) {
+        app->clipboard_path[0] = '\0';
+    }
+}
+
+static Pixmap capture_selection_pixmap(App *app, Rect rect) {
+    Pixmap pixmap = XCreatePixmap(app->display, app->root, (unsigned int)rect.w,
+                                  (unsigned int)rect.h, (unsigned int)app->root_depth);
+    if (!pixmap) {
+        return 0;
+    }
+
+    GC gc = XCreateGC(app->display, pixmap, 0, NULL);
+    XCopyArea(app->display, app->root, pixmap, gc, rect.x, rect.y,
+              (unsigned int)rect.w, (unsigned int)rect.h, 0, 0);
+    XFreeGC(app->display, gc);
+    XSync(app->display, False);
+    return pixmap;
+}
+
+static int editor_save(Editor *editor) {
+    char path[PATH_MAX];
+    char display_path[PATH_MAX];
+    if (build_output_path(path, sizeof(path), display_path, sizeof(display_path)) != 0) {
+        return -1;
+    }
+    if (editor_export_png(editor, path) != 0) {
+        return -1;
+    }
+    snprintf(editor->saved_display_path, sizeof(editor->saved_display_path), "%s", display_path);
+    editor->saved = 1;
+    editor->done = 1;
+    return 0;
+}
+
+static int editor_copy(Editor *editor) {
+    App *app = editor->app;
+    char path[PATH_MAX];
+    if (editor_temp_path(path, sizeof(path)) != 0) {
+        return -1;
+    }
+    if (editor_export_png(editor, path) != 0) {
+        return -1;
+    }
+
+    snprintf(app->clipboard_path, sizeof(app->clipboard_path), "%s", path);
+    XSetSelectionOwner(app->display, app->atom_clipboard, app->clipboard_window, CurrentTime);
+    if (XGetSelectionOwner(app->display, app->atom_clipboard) != app->clipboard_window) {
+        app->clipboard_path[0] = '\0';
+        return -1;
+    }
+
+    editor->copied = 1;
+    editor->done = 1;
+    return 0;
+}
+
+static void editor_handle_action(Editor *editor, ButtonAction action, Tool tool) {
+    if (action == ACTION_TOOL_BLUR || action == ACTION_TOOL_ARROW ||
+        action == ACTION_TOOL_RECT || action == ACTION_TOOL_TEXT) {
+        editor->active_tool = tool;
+        editor->text_entry = 0;
+    } else if (action == ACTION_UNDO) {
+        if (editor->op_count > 0) {
+            editor->op_count--;
+        }
+        editor->text_entry = 0;
+    } else if (action == ACTION_SAVE) {
+        editor_save(editor);
+    } else if (action == ACTION_COPY) {
+        editor_copy(editor);
+    }
+}
+
+static void editor_commit_text(Editor *editor) {
+    if (editor->text_len <= 0) {
+        editor->text_entry = 0;
+        return;
+    }
+
+    Annotation annotation;
+    memset(&annotation, 0, sizeof(annotation));
+    annotation.tool = TOOL_TEXT;
+    annotation.x1 = editor->text_x;
+    annotation.y1 = editor->text_y;
+    annotation.x2 = editor->text_x;
+    annotation.y2 = editor->text_y;
+    snprintf(annotation.text, sizeof(annotation.text), "%s", editor->text_buffer);
+    editor_add_annotation(editor, &annotation);
+    editor->text_entry = 0;
+    editor->text_len = 0;
+    editor->text_buffer[0] = '\0';
+}
+
+static void editor_handle_text_key(Editor *editor, XKeyEvent *key) {
+    KeySym sym = NoSymbol;
+    char buffer[32];
+    int count = XLookupString(key, buffer, sizeof(buffer), &sym, NULL);
+
+    if (sym == XK_Return || sym == XK_KP_Enter) {
+        editor_commit_text(editor);
+    } else if (sym == XK_Escape) {
+        editor->text_entry = 0;
+        editor->text_len = 0;
+        editor->text_buffer[0] = '\0';
+    } else if (sym == XK_BackSpace) {
+        if (editor->text_len > 0) {
+            editor->text_buffer[--editor->text_len] = '\0';
+        }
+    } else if (count > 0) {
+        for (int i = 0; i < count && editor->text_len < MAX_TEXT_LEN - 1; i++) {
+            unsigned char ch = (unsigned char)buffer[i];
+            if (ch >= 32 && ch < 127) {
+                editor->text_buffer[editor->text_len++] = (char)ch;
+                editor->text_buffer[editor->text_len] = '\0';
+            }
+        }
+    }
+}
+
+static void editor_handle_key(Editor *editor, XKeyEvent *key) {
+    if (editor->text_entry) {
+        editor_handle_text_key(editor, key);
+        return;
+    }
+
+    KeySym sym = XLookupKeysym(key, 0);
+    int ctrl = (key->state & ControlMask) != 0;
+    if (sym == XK_Escape) {
+        editor->done = 1;
+    } else if (ctrl && (sym == XK_z || sym == XK_Z)) {
+        if (editor->op_count > 0) {
+            editor->op_count--;
+        }
+    } else if (ctrl && (sym == XK_s || sym == XK_S)) {
+        editor_save(editor);
+    } else if (ctrl && (sym == XK_c || sym == XK_C)) {
+        editor_copy(editor);
+    } else if (sym == XK_b || sym == XK_B) {
+        editor->active_tool = TOOL_BLUR;
+    } else if (sym == XK_a || sym == XK_A) {
+        editor->active_tool = TOOL_ARROW;
+    } else if (sym == XK_r || sym == XK_R) {
+        editor->active_tool = TOOL_RECT;
+    } else if (sym == XK_t || sym == XK_T) {
+        editor->active_tool = TOOL_TEXT;
+    }
+}
+
+static void editor_finish_drawing(Editor *editor, int x, int y) {
+    editor->preview.x2 = clamp_int(x, 0, editor->rect.w - 1);
+    editor->preview.y2 = clamp_int(y, 0, editor->rect.h - 1);
+
+    Rect rect = annotation_rect(&editor->preview, editor->rect.w, editor->rect.h);
+    int keep = 0;
+    if (editor->preview.tool == TOOL_ARROW) {
+        int dx = editor->preview.x2 - editor->preview.x1;
+        int dy = editor->preview.y2 - editor->preview.y1;
+        keep = dx * dx + dy * dy > 25;
+    } else {
+        keep = rect.w >= 4 && rect.h >= 4;
+    }
+
+    if (keep) {
+        editor_add_annotation(editor, &editor->preview);
+    }
+    editor->drawing = 0;
+}
+
+static Window editor_create_window(Editor *editor) {
+    App *app = editor->app;
+    int toolbar_w = editor_toolbar_width();
+    editor->win_w = editor->rect.w > toolbar_w ? editor->rect.w : toolbar_w;
+    editor->win_h = editor->rect.h + TOOLBAR_H;
+    editor->image_x = (editor->win_w - editor->rect.w) / 2;
+    editor->image_y = TOOLBAR_H;
+
+    int max_x = app->root_w - editor->win_w;
+    int max_y = app->root_h - editor->win_h;
+    if (max_x < 0) {
+        max_x = 0;
+    }
+    if (max_y < 0) {
+        max_y = 0;
+    }
+
+    int win_x = clamp_int(editor->rect.x, 0, max_x);
+    int preferred_y = editor->rect.y >= TOOLBAR_H ? editor->rect.y - TOOLBAR_H : editor->rect.y;
+    int win_y = clamp_int(preferred_y, 0, max_y);
+
+    XSetWindowAttributes attrs;
+    memset(&attrs, 0, sizeof(attrs));
+    attrs.override_redirect = True;
+    attrs.background_pixel = app->color_bg;
+    attrs.border_pixel = app->color_border;
+    attrs.colormap = app->root_colormap;
+    attrs.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                       PointerMotionMask | KeyPressMask | StructureNotifyMask;
+
+    return XCreateWindow(app->display, app->root, win_x, win_y,
+                         (unsigned int)editor->win_w, (unsigned int)editor->win_h, 0,
+                         (unsigned int)app->root_depth, InputOutput, app->root_visual,
+                         CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWColormap | CWEventMask, &attrs);
+}
+
+static int run_editor(App *app, Pixmap shot, Rect selection, int *saved, int *copied, char *display_path,
+                      size_t display_path_size) {
+    Editor editor;
+    memset(&editor, 0, sizeof(editor));
+    editor.app = app;
+    editor.shot = shot;
+    editor.rect = selection;
+    editor.active_tool = TOOL_RECT;
+
+    editor.window = editor_create_window(&editor);
+    if (!editor.window) {
+        return -1;
+    }
+
+    XStoreName(app->display, editor.window, "Modern Screenshot Editor");
+    XMapRaised(app->display, editor.window);
+    XSetInputFocus(app->display, editor.window, RevertToParent, CurrentTime);
+    XSync(app->display, False);
+    editor_redraw(&editor);
+
+    while (!editor.done && keep_running) {
+        XEvent event;
+        XNextEvent(app->display, &event);
+
+        if (event.type == SelectionRequest || event.type == SelectionClear) {
+            handle_clipboard_event(app, &event);
+            continue;
+        }
+        if (event.xany.window != editor.window) {
+            continue;
+        }
+
+        switch (event.type) {
+        case Expose:
+            editor_redraw(&editor);
+            break;
+        case KeyPress:
+            editor_handle_key(&editor, &event.xkey);
+            editor_redraw(&editor);
+            break;
+        case ButtonPress: {
+            Tool tool = TOOL_BLUR;
+            ButtonAction action = editor_button_at(event.xbutton.x, event.xbutton.y, &tool);
+            if (action != ACTION_NONE) {
+                editor_handle_action(&editor, action, tool);
+                editor_redraw(&editor);
+                break;
+            }
+            if (!editor_point_in_image(&editor, event.xbutton.x, event.xbutton.y)) {
+                break;
+            }
+
+            int ix = clamp_int(editor_image_x(&editor, event.xbutton.x), 0, editor.rect.w - 1);
+            int iy = clamp_int(editor_image_y(&editor, event.xbutton.y), 0, editor.rect.h - 1);
+            if (editor.active_tool == TOOL_TEXT) {
+                editor.text_entry = 1;
+                editor.text_x = ix;
+                editor.text_y = iy;
+                editor.text_len = 0;
+                editor.text_buffer[0] = '\0';
+            } else {
+                memset(&editor.preview, 0, sizeof(editor.preview));
+                editor.preview.tool = editor.active_tool;
+                editor.preview.x1 = ix;
+                editor.preview.y1 = iy;
+                editor.preview.x2 = ix;
+                editor.preview.y2 = iy;
+                editor.drawing = 1;
+            }
+            editor_redraw(&editor);
+            break;
+        }
+        case MotionNotify:
+            if (editor.drawing) {
+                while (XCheckTypedWindowEvent(app->display, editor.window, MotionNotify, &event)) {
+                }
+                int ix = clamp_int(editor_image_x(&editor, event.xmotion.x), 0, editor.rect.w - 1);
+                int iy = clamp_int(editor_image_y(&editor, event.xmotion.y), 0, editor.rect.h - 1);
+                editor.preview.x2 = ix;
+                editor.preview.y2 = iy;
+                editor_redraw(&editor);
+            }
+            break;
+        case ButtonRelease:
+            if (editor.drawing) {
+                int ix = clamp_int(editor_image_x(&editor, event.xbutton.x), 0, editor.rect.w - 1);
+                int iy = clamp_int(editor_image_y(&editor, event.xbutton.y), 0, editor.rect.h - 1);
+                editor_finish_drawing(&editor, ix, iy);
+                editor_redraw(&editor);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
+    XDestroyWindow(app->display, editor.window);
+    XFlush(app->display);
+
+    *saved = editor.saved;
+    *copied = editor.copied;
+    if (editor.saved_display_path[0]) {
+        snprintf(display_path, display_path_size, "%s", editor.saved_display_path);
+    } else {
+        display_path[0] = '\0';
+    }
+    return 0;
 }
 
 static void draw_toast(App *app, Window toast, int width, int height, const char *message) {
@@ -769,27 +1603,77 @@ static int interactive_capture(App *app) {
         return 0;
     }
 
-    char path[PATH_MAX];
+    Pixmap shot = capture_selection_pixmap(app, selection);
+    if (!shot) {
+        show_toast(app, "Capture failed");
+        return -1;
+    }
+
+    int saved = 0;
+    int copied = 0;
     char display_path[PATH_MAX];
-    if (build_output_path(path, sizeof(path), display_path, sizeof(display_path)) != 0) {
-        show_toast(app, "Save failed");
+    if (run_editor(app, shot, selection, &saved, &copied, display_path, sizeof(display_path)) != 0) {
+        XFreePixmap(app->display, shot);
+        show_toast(app, "Editor failed");
         return -1;
     }
+    XFreePixmap(app->display, shot);
 
-    if (write_capture_png(app, selection, path) != 0) {
-        show_toast(app, "Save failed");
-        return -1;
+    if (saved) {
+        char message[256];
+        snprintf(message, sizeof(message), "Saved %.220s", display_path);
+        show_toast(app, message);
+    } else if (copied) {
+        show_toast(app, "Copied PNG to clipboard");
     }
-
-    char message[256];
-    snprintf(message, sizeof(message), "Saved %.220s", display_path);
-    show_toast(app, message);
     return 0;
 }
 
 static int capture_root(App *app, const char *path) {
     Rect rect = {0, 0, app->root_w, app->root_h};
     return write_capture_png(app, rect, path);
+}
+
+static int self_test_export(App *app, const char *path) {
+    Rect rect = {0, 0, 320, 180};
+    Pixmap shot = XCreatePixmap(app->display, app->root, (unsigned int)rect.w,
+                                (unsigned int)rect.h, (unsigned int)app->root_depth);
+    if (!shot) {
+        return -1;
+    }
+
+    GC gc = XCreateGC(app->display, shot, 0, NULL);
+    XSetForeground(app->display, gc, app->color_panel);
+    XFillRectangle(app->display, shot, gc, 0, 0, (unsigned int)rect.w, (unsigned int)rect.h);
+    XSetForeground(app->display, gc, app->color_border);
+    for (int x = 0; x < rect.w; x += 24) {
+        XDrawLine(app->display, shot, gc, x, 0, x, rect.h);
+    }
+    for (int y = 0; y < rect.h; y += 24) {
+        XDrawLine(app->display, shot, gc, 0, y, rect.w, y);
+    }
+    XFreeGC(app->display, gc);
+
+    Editor editor;
+    memset(&editor, 0, sizeof(editor));
+    editor.app = app;
+    editor.shot = shot;
+    editor.rect = rect;
+    editor.win_w = rect.w;
+    editor.win_h = rect.h;
+
+    Annotation blur = {TOOL_BLUR, 20, 22, 142, 86, {0}};
+    Annotation arrow = {TOOL_ARROW, 38, 145, 184, 105, {0}};
+    Annotation box = {TOOL_RECT, 176, 34, 294, 132, {0}};
+    Annotation text = {TOOL_TEXT, 184, 154, 184, 154, "Modern"};
+    editor_add_annotation(&editor, &blur);
+    editor_add_annotation(&editor, &arrow);
+    editor_add_annotation(&editor, &box);
+    editor_add_annotation(&editor, &text);
+
+    int status = editor_export_png(&editor, path);
+    XFreePixmap(app->display, shot);
+    return status;
 }
 
 static int grab_hotkey(App *app) {
@@ -826,6 +1710,10 @@ static int run_daemon(App *app) {
     while (keep_running) {
         XEvent event;
         XNextEvent(app->display, &event);
+        if (event.type == SelectionRequest || event.type == SelectionClear) {
+            handle_clipboard_event(app, &event);
+            continue;
+        }
         if (event.type != KeyPress) {
             continue;
         }
@@ -846,6 +1734,7 @@ static void usage(FILE *stream) {
             "  modern-screenshot             Run hotkey daemon (%s)\n"
             "  modern-screenshot --once      Start one interactive capture\n"
             "  modern-screenshot --capture-root PATH\n"
+            "  modern-screenshot --self-test PATH\n"
             "  modern-screenshot --version\n",
             VERSION, HOTKEY_KEYS);
 }
@@ -875,6 +1764,8 @@ int main(int argc, char **argv) {
         status = interactive_capture(&app) == 0 ? 0 : 1;
     } else if (argc > 2 && strcmp(argv[1], "--capture-root") == 0) {
         status = capture_root(&app, argv[2]) == 0 ? 0 : 1;
+    } else if (argc > 2 && strcmp(argv[1], "--self-test") == 0) {
+        status = self_test_export(&app, argv[2]) == 0 ? 0 : 1;
     } else if (argc == 1) {
         status = run_daemon(&app) == 0 ? 0 : 1;
     } else {
