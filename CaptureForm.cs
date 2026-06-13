@@ -24,6 +24,7 @@ namespace ModernScreenshot
         private List<DrawAction> drawActions = new List<DrawAction>();
         private List<DrawAction> redoStack = new List<DrawAction>();
         private DrawAction? currentAction;
+        private ToolTip toolTip = new ToolTip();
 
         public CaptureForm()
         {
@@ -413,7 +414,7 @@ namespace ModernScreenshot
             // 使用 Pixpin 风格工具栏
             var toolbar = new PixpinToolbar
             {
-                Size = new Size(660, 50),
+                Size = new Size(500, 50),
                 Location = new Point(selectionRect.X, selectionRect.Bottom + 10)
             };
 
@@ -474,18 +475,17 @@ namespace ModernScreenshot
             toolbar.Controls.Add(sep2);
             x += sep2.Width + 6;
 
-            // 保存按钮 - 主按钮，加宽突出
+            // 保存按钮 - 主按钮
             var saveBtn = new PixpinButton
             {
                 Location = new Point(x, 7),
-                Size = new Size(80, 36),
+                Size = new Size(44, 36),
                 IconText = "💾",
                 ButtonText = "保存",
-                IsPrimary = true,
-                IsIconOnly = false,
-                Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold)
+                IsPrimary = true
             };
             saveBtn.ButtonClick += (s, e) => SaveToFile();
+            toolTip.SetToolTip(saveBtn, "保存 (Ctrl+S)");
             toolbar.Controls.Add(saveBtn);
             x += saveBtn.Width + spacing;
 
@@ -525,9 +525,10 @@ namespace ModernScreenshot
                 Size = new Size(44, 36),
                 IconText = icon,
                 ButtonText = tooltip,
-                IsIconOnly = true,
                 Tag = mode
             };
+
+            toolTip.SetToolTip(btn, tooltip);
 
             btn.ButtonClick += (s, e) =>
             {
@@ -563,14 +564,17 @@ namespace ModernScreenshot
 
         private PixpinButton CreateActionButton(string icon, string text, int x, int y)
         {
-            return new PixpinButton
+            var btn = new PixpinButton
             {
                 Location = new Point(x, y),
-                Size = new Size(68, 36),
+                Size = new Size(44, 36),
                 IconText = icon,
-                ButtonText = text,
-                IsIconOnly = false
+                ButtonText = text
             };
+
+            toolTip.SetToolTip(btn, text);
+
+            return btn;
         }
 
         private Color GetContrastColor(Color color)

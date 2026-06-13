@@ -203,17 +203,8 @@ namespace ModernScreenshot
                 }
             }
 
-            // 绘制图标和文字
-            if (IsIconOnly)
-            {
-                // 只显示图标（工具按钮）
-                DrawIcon(g, IconText);
-            }
-            else
-            {
-                // 显示图标 + 文字（操作按钮）
-                DrawIconWithText(g, IconText, ButtonText);
-            }
+            // 所有按钮都只显示图标，文字通过 ToolTip 显示
+            DrawIcon(g, IconText);
         }
 
         private void DrawIcon(Graphics g, string icon)
@@ -232,33 +223,6 @@ namespace ModernScreenshot
 
                 // 绘制图标
                 g.DrawString(icon, iconFont, Brushes.White, point);
-            }
-        }
-
-        private void DrawIconWithText(Graphics g, string icon, string text)
-        {
-            // 图标
-            using (Font iconFont = new Font("Segoe UI Emoji", 13F, FontStyle.Regular))
-            {
-                SizeF iconSize = g.MeasureString(icon, iconFont);
-                float iconX = 8;
-                float iconY = (this.Height - iconSize.Height) / 2;
-
-                g.DrawString(icon, iconFont, new SolidBrush(Color.FromArgb(80, 0, 0, 0)),
-                    iconX + 0.5f, iconY + 0.5f);
-                g.DrawString(icon, iconFont, Brushes.White, iconX, iconY);
-            }
-
-            // 文字
-            using (Font textFont = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular))
-            {
-                SizeF textSize = g.MeasureString(text, textFont);
-                float textX = 28;
-                float textY = (this.Height - textSize.Height) / 2;
-
-                g.DrawString(text, textFont, new SolidBrush(Color.FromArgb(80, 0, 0, 0)),
-                    textX + 0.5f, textY + 0.5f);
-                g.DrawString(text, textFont, Brushes.White, textX, textY);
             }
         }
 
