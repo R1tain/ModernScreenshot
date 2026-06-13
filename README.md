@@ -17,6 +17,7 @@ The implementation is intentionally small:
 - `Ctrl+1` global hotkey
 - Windows tray icon with Capture, Long Capture, Settings, and Exit
 - configurable Windows hotkey stored in `%APPDATA%\ModernScreenshot\settings.ini`
+- Windows setting to enable or disable start with Windows
 - hotkey conflict warning with a settings entry point
 - region selection overlay
 - Windows long screenshot mode for scrollable content
@@ -60,7 +61,7 @@ Windows:
 .\build\windows\ModernScreenshot.exe
 ```
 
-On Windows, the app stays in the system tray. Use the tray menu to capture, long capture, open settings, or exit. If `Ctrl+1` is already used by another app, open Settings from the tray menu and choose another hotkey.
+On Windows, the app stays in the system tray. Use the tray menu to capture, long capture, open settings, or exit. If `Ctrl+1` is already used by another app, open Settings from the tray menu and choose another hotkey. Settings also has a `Start with Windows` checkbox for the current user.
 
 Press the configured hotkey, drag a region, and release the mouse. The editor opens on the captured region:
 
@@ -87,13 +88,13 @@ For a one-shot capture:
 ./build/modern-screenshot --once
 ```
 
-For a Windows long screenshot, choose `Long Capture...` from the tray menu or run:
+For a Windows long screenshot, press the capture hotkey and click `Long` in the selection overlay, choose `Long Capture...` from the tray menu, or run:
 
 ```powershell
 .\build\windows\ModernScreenshot.exe --long
 ```
 
-Drag the visible scrollable content area. The app captures the first frame, scrolls downward, stitches up to 8 frames, and opens the result in the editor. Long capture works best when the selected area is inside a window that responds to the mouse wheel.
+Drag the visible scrollable content area, then drag downward to choose the scroll length. The app captures the first frame, scrolls only for the selected length, stitches the result, and opens it in the editor. Long capture works best when the selected area is inside a window that responds to the mouse wheel.
 
 For an automated editor export test:
 

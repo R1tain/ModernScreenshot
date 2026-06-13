@@ -47,6 +47,7 @@ using Gdiplus::UnitPixel;
 static const wchar_t *kVersion = WIDEN(VERSION);
 static const wchar_t *kHiddenClass = L"ModernScreenshotHidden";
 static const wchar_t *kOverlayClass = L"ModernScreenshotOverlay";
+static const wchar_t *kLengthClass = L"ModernScreenshotLength";
 static const wchar_t *kEditorClass = L"ModernScreenshotEditor";
 static const wchar_t *kSettingsClass = L"ModernScreenshotSettings";
 static const int kHotkeyId = 1001;
@@ -72,6 +73,11 @@ static const int kSettingsShift = 3005;
 static const int kSettingsWin = 3006;
 static const int kSettingsKey = 3007;
 static const int kSettingsStatus = 3008;
+static const int kSettingsStartup = 3009;
+static const int kOverlayModeW = 116;
+static const int kOverlayModeH = 34;
+static const int kOverlayModeGap = 8;
+static const int kLengthMin = 120;
 
 enum Tool {
     ToolBlur,
@@ -89,6 +95,11 @@ enum Action {
     ActionUndo,
     ActionCopy,
     ActionSave,
+};
+
+enum CaptureKind {
+    CaptureRegion,
+    CaptureLongRegion,
 };
 
 struct ButtonSpec {
@@ -120,12 +131,23 @@ struct LongFrame {
 
 struct OverlayState {
     ScreenCapture capture;
+    bool showModeButtons = false;
+    CaptureKind kind = CaptureRegion;
     bool dragging = false;
     bool done = false;
     bool cancelled = false;
     POINT start = {0, 0};
     POINT current = {0, 0};
     RECT selection = {0, 0, 0, 0};
+};
+
+struct LengthState {
+    ScreenCapture capture;
+    RECT selection = {0, 0, 0, 0};
+    bool dragging = false;
+    bool done = false;
+    bool cancelled = false;
+    int length = 0;
 };
 
 struct EditorState {
@@ -169,6 +191,7 @@ static bool g_hotkeyRegistered = false;
 static bool g_captureActive = false;
 
 static void ShowTrayBalloon(HWND hwnd, const std::wstring &title, const std::wstring &message);
+static HBITMAP CaptureLongSelection(const RECT &selection, int desiredHeight, int *outH);
 
 static const ButtonSpec kButtons[] = {
     {ActionToolBlur, ToolBlur, L"Blur"},
@@ -251,8 +274,34 @@ static RECT ButtonRect(int index) {
     return rect;
 }
 
+static RECT OverlayModeRect(int index) {
+    RECT rect;
+    rect.left = 16 + index * (kOverlayModeW + kOverlayModeGap);
+    rect.top = 16;
+    rect.right = rect.left + kOverlayModeW;
+    rect.bottom = rect.top + kOverlayModeH;
+    return rect;
+}
+
 static bool PointInRect(int x, int y, const RECT &rect) {
     return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+}
+
+static CaptureKind OverlayModeAt(int x, int y, bool *hit) {
+    RECT region = OverlayModeRect(0);
+    if (PointInRect(x, y, region)) {
+        *hit = true;
+        return CaptureRegion;
+    }
+
+    RECT longRegion = OverlayModeRect(1);
+    if (PointInRect(x, y, longRegion)) {
+        *hit = true;
+        return CaptureLongRegion;
+    }
+
+    *hit = false;
+    return CaptureRegion;
 }
 
 static bool IsRectEmptyOrInvalid(const RECT &rect) {
@@ -352,6 +401,56 @@ static void SaveSettings() {
     WritePrivateProfileStringW(L"hotkey", L"modifiers", value, path.c_str());
     wsprintfW(value, L"%u", g_settings.vk);
     WritePrivateProfileStringW(L"hotkey", L"vk", value, path.c_str());
+}
+
+static std::wstring ModulePath() {
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+    return path;
+}
+
+static std::wstring QuotedPath(const std::wstring &path) {
+    return L"\"" + path + L"\"";
+}
+
+static bool IsStartupEnabled() {
+    HKEY key = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    wchar_t value[MAX_PATH * 2] = {};
+    DWORD bytes = sizeof(value);
+    DWORD type = 0;
+    LONG status = RegQueryValueExW(key, L"ModernScreenshot", NULL, &type,
+                                   reinterpret_cast<LPBYTE>(value), &bytes);
+    RegCloseKey(key);
+    return status == ERROR_SUCCESS && type == REG_SZ;
+}
+
+static bool SetStartupEnabled(bool enabled) {
+    HKEY key = NULL;
+    const wchar_t *runKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    if (enabled) {
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, runKey, 0, NULL, 0, KEY_SET_VALUE,
+                            NULL, &key, NULL) != ERROR_SUCCESS) {
+            return false;
+        }
+        std::wstring command = QuotedPath(ModulePath());
+        LONG status = RegSetValueExW(key, L"ModernScreenshot", 0, REG_SZ,
+                                     reinterpret_cast<const BYTE *>(command.c_str()),
+                                     static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(key);
+        return status == ERROR_SUCCESS;
+    }
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, runKey, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
+        return true;
+    }
+    LONG status = RegDeleteValueW(key, L"ModernScreenshot");
+    RegCloseKey(key);
+    return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
 }
 
 static void BuildRoundedRectPath(GraphicsPath *path, float x, float y, float w, float h, float radius) {
@@ -688,6 +787,24 @@ static void DrawCenteredText(HDC dc, const wchar_t *text, const RECT &rect, int 
     DeleteObject(font);
 }
 
+static void DrawOverlayModeButton(HDC dc, const RECT &rect, const wchar_t *text, bool active, int offsetX, int offsetY) {
+    RECT drawRect = {rect.left - offsetX, rect.top - offsetY, rect.right - offsetX, rect.bottom - offsetY};
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        GraphicsPath path;
+        BuildRoundedRectPath(&path, static_cast<float>(drawRect.left), static_cast<float>(drawRect.top),
+                             static_cast<float>(RectWidth(drawRect)), static_cast<float>(RectHeight(drawRect)), 10.0f);
+        SolidBrush fill(active ? Color(245, 23, 198, 163) : Color(230, 16, 21, 24));
+        Pen outline(active ? Color(255, 245, 251, 248) : Color(150, 82, 98, 100), active ? 1.4f : 1.0f);
+        graphics.FillPath(&fill, &path);
+        graphics.DrawPath(&outline, &path);
+    } else {
+        FillRectColor(dc, drawRect, active ? RGB(23, 198, 163) : RGB(16, 21, 24));
+    }
+    DrawCenteredText(dc, text, drawRect, -14, FW_SEMIBOLD, active ? RGB(7, 11, 14) : RGB(245, 251, 248));
+}
+
 static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offsetX, int offsetY) {
     HDC source = CreateCompatibleDC(dc);
     HGDIOBJ old = SelectObject(source, state->capture.bitmap);
@@ -698,6 +815,13 @@ static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offset
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
         SolidBrush shade(Color(138, 7, 11, 14));
         graphics.FillRectangle(&shade, 0, 0, state->capture.w, state->capture.h);
+    }
+
+    if (state->showModeButtons) {
+        DrawOverlayModeButton(dc, OverlayModeRect(0), L"Screenshot", state->kind == CaptureRegion, offsetX, offsetY);
+        DrawOverlayModeButton(dc, OverlayModeRect(1), L"Long", state->kind == CaptureLongRegion, offsetX, offsetY);
+        DrawTextLabel(dc, state->kind == CaptureLongRegion ? L"Drag scroll area, then choose scroll length" : L"Drag to capture region",
+                      16 - offsetX, 58 - offsetY, RGB(245, 251, 248));
     }
 
     if (state->dragging) {
@@ -850,9 +974,20 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
         return 0;
     case WM_LBUTTONDOWN:
         if (state) {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            if (state->showModeButtons) {
+                bool hitMode = false;
+                CaptureKind mode = OverlayModeAt(x, y, &hitMode);
+                if (hitMode) {
+                    state->kind = mode;
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+            }
             SetCapture(hwnd);
             state->dragging = true;
-            state->start = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            state->start = {x, y};
             state->current = state->start;
         }
         return 0;
@@ -893,9 +1028,12 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-static bool RunSelectionOverlay(const ScreenCapture &capture, RECT *selection) {
+static bool RunSelectionOverlay(const ScreenCapture &capture, RECT *selection, CaptureKind *kind,
+                                bool showModeButtons, CaptureKind initialKind) {
     OverlayState state;
     state.capture = capture;
+    state.showModeButtons = showModeButtons;
+    state.kind = initialKind;
 
     HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kOverlayClass, L"Modern Screenshot",
                                 WS_POPUP, capture.x, capture.y, capture.w, capture.h,
@@ -919,6 +1057,216 @@ static bool RunSelectionOverlay(const ScreenCapture &capture, RECT *selection) {
         return false;
     }
     *selection = state.selection;
+    if (kind) {
+        *kind = state.kind;
+    }
+    return true;
+}
+
+static void UpdateLengthFromPoint(LengthState *state, int y) {
+    int minLength = std::max(kLengthMin, RectHeight(state->selection));
+    state->length = Clamp(y - state->selection.top, minLength, kLongCaptureMaxHeight);
+}
+
+static void DrawLengthOverlayOffset(LengthState *state, HWND hwnd, HDC dc, int offsetX, int offsetY) {
+    HDC source = CreateCompatibleDC(dc);
+    HGDIOBJ old = SelectObject(source, state->capture.bitmap);
+    BitBlt(dc, -offsetX, -offsetY, state->capture.w, state->capture.h, source, 0, 0, SRCCOPY);
+
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        SolidBrush shade(Color(150, 7, 11, 14));
+        graphics.FillRectangle(&shade, 0, 0, state->capture.w, state->capture.h);
+    }
+
+    RECT selected = state->selection;
+    BitBlt(dc, selected.left - offsetX, selected.top - offsetY, RectWidth(selected), RectHeight(selected),
+           source, selected.left, selected.top, SRCCOPY);
+
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        Pen accent(Color(255, 23, 198, 163), 2.4f);
+        Pen yellow(Color(255, 255, 207, 90), 3.0f);
+        int left = selected.left - offsetX;
+        int top = selected.top - offsetY;
+        int right = selected.right - offsetX;
+        graphics.DrawRectangle(&accent, left, top, RectWidth(selected), RectHeight(selected));
+
+        int markerX = right + 18;
+        if (markerX > state->capture.w - offsetX - 28) {
+            markerX = left - 18;
+        }
+        int markerStart = top;
+        int visibleLength = std::min<int>(state->length, state->capture.h - selected.top - 28);
+        int markerEnd = selected.top + visibleLength - offsetY;
+        markerEnd = std::max(markerStart + 32, markerEnd);
+        graphics.DrawLine(&yellow, markerX, markerStart, markerX, markerEnd);
+        graphics.DrawLine(&yellow, markerX, markerEnd, markerX - 7, markerEnd - 10);
+        graphics.DrawLine(&yellow, markerX, markerEnd, markerX + 7, markerEnd - 10);
+    }
+
+    wchar_t lengthText[96];
+    wsprintfW(lengthText, L"Scroll length: %d px", state->length);
+    RECT pill = {selected.left, selected.top - 34, selected.left + 190, selected.top - 6};
+    if (pill.top < 8) {
+        OffsetRect(&pill, 0, RectHeight(selected) + 42);
+    }
+    RECT drawPill = {pill.left - offsetX, pill.top - offsetY, pill.right - offsetX, pill.bottom - offsetY};
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        GraphicsPath path;
+        BuildRoundedRectPath(&path, static_cast<float>(drawPill.left), static_cast<float>(drawPill.top),
+                             static_cast<float>(RectWidth(drawPill)), static_cast<float>(RectHeight(drawPill)), 8.0f);
+        SolidBrush brush(Color(238, 16, 21, 24));
+        graphics.FillPath(&brush, &path);
+    } else {
+        FillRectColor(dc, drawPill, RGB(16, 21, 24));
+    }
+    DrawTextLabel(dc, lengthText, drawPill.left + 10, drawPill.top + 5, RGB(245, 251, 248));
+    DrawTextLabel(dc, L"Drag down to choose length. Wheel adjusts. Enter starts. Esc cancels.",
+                  16 - offsetX, 18 - offsetY, RGB(245, 251, 248));
+
+    SelectObject(source, old);
+    DeleteDC(source);
+    (void)hwnd;
+}
+
+static void PaintLengthBuffered(LengthState *state, HWND hwnd, HDC dc, const RECT &paint) {
+    int w = RectWidth(paint);
+    int h = RectHeight(paint);
+    if (!state || w <= 0 || h <= 0) {
+        return;
+    }
+
+    HDC memory = CreateCompatibleDC(dc);
+    HBITMAP buffer = CreateCompatibleBitmap(dc, w, h);
+    if (!memory || !buffer) {
+        if (buffer) {
+            DeleteObject(buffer);
+        }
+        if (memory) {
+            DeleteDC(memory);
+        }
+        DrawLengthOverlayOffset(state, hwnd, dc, 0, 0);
+        return;
+    }
+
+    HGDIOBJ old = SelectObject(memory, buffer);
+    DrawLengthOverlayOffset(state, hwnd, memory, paint.left, paint.top);
+    BitBlt(dc, paint.left, paint.top, w, h, memory, 0, 0, SRCCOPY);
+    SelectObject(memory, old);
+    DeleteObject(buffer);
+    DeleteDC(memory);
+}
+
+static LRESULT CALLBACK LengthProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    LengthState *state = reinterpret_cast<LengthState *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    switch (message) {
+    case WM_CREATE: {
+        CREATESTRUCTW *create = reinterpret_cast<CREATESTRUCTW *>(lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        SetCursor(LoadCursor(NULL, IDC_SIZENS));
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SETCURSOR:
+        SetCursor(LoadCursor(NULL, IDC_SIZENS));
+        return TRUE;
+    case WM_KEYDOWN:
+        if (!state) {
+            return 0;
+        }
+        if (wParam == VK_ESCAPE) {
+            state->cancelled = true;
+            state->done = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (wParam == VK_RETURN) {
+            state->done = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        return 0;
+    case WM_LBUTTONDOWN:
+        if (state) {
+            SetCapture(hwnd);
+            state->dragging = true;
+            UpdateLengthFromPoint(state, GET_Y_LPARAM(lParam));
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    case WM_MOUSEMOVE:
+        if (state && state->dragging) {
+            UpdateLengthFromPoint(state, GET_Y_LPARAM(lParam));
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        if (state && state->dragging) {
+            ReleaseCapture();
+            UpdateLengthFromPoint(state, GET_Y_LPARAM(lParam));
+            state->done = true;
+            DestroyWindow(hwnd);
+        }
+        return 0;
+    case WM_MOUSEWHEEL:
+        if (state) {
+            int step = std::max(80, RectHeight(state->selection) / 3);
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            int minLength = std::max(kLengthMin, RectHeight(state->selection));
+            state->length = Clamp(state->length + (delta < 0 ? step : -step), minLength, kLongCaptureMaxHeight);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        if (state) {
+            PaintLengthBuffered(state, hwnd, dc, ps.rcPaint);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    }
+
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+static bool RunLengthOverlay(const ScreenCapture &capture, const RECT &selection, int *scrollLength) {
+    LengthState state;
+    state.capture = capture;
+    state.selection = {selection.left - capture.x, selection.top - capture.y,
+                       selection.right - capture.x, selection.bottom - capture.y};
+    state.length = std::max(kLengthMin, RectHeight(state.selection));
+
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kLengthClass, L"Modern Screenshot Length",
+                                WS_POPUP, capture.x, capture.y, capture.w, capture.h,
+                                NULL, NULL, g_instance, &state);
+    if (!hwnd) {
+        return false;
+    }
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+    SetForegroundWindow(hwnd);
+    SetFocus(hwnd);
+
+    MSG msg;
+    while (!state.done && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    if (state.cancelled || state.length < kLengthMin) {
+        return false;
+    }
+    *scrollLength = state.length;
     return true;
 }
 
@@ -1577,7 +1925,7 @@ static void RunEditorModal(HBITMAP shot, int w, int h) {
     }
 }
 
-static void RunCapture() {
+static void RunSelectedCapture(CaptureKind initialKind) {
     if (g_captureActive) {
         return;
     }
@@ -1589,15 +1937,41 @@ static void RunCapture() {
     }
 
     RECT selection;
-    if (RunSelectionOverlay(capture, &selection)) {
-        HBITMAP shot = CropCapture(capture, selection);
-        if (shot) {
-            RunEditorModal(shot, RectWidth(selection), RectHeight(selection));
-            DeleteObject(shot);
+    CaptureKind kind = initialKind;
+    if (RunSelectionOverlay(capture, &selection, &kind, true, initialKind)) {
+        if (kind == CaptureLongRegion) {
+            int desiredHeight = 0;
+            if (RunLengthOverlay(capture, selection, &desiredHeight)) {
+                DeleteObject(capture.bitmap);
+                capture.bitmap = NULL;
+                Sleep(120);
+
+                int longH = 0;
+                HBITMAP shot = CaptureLongSelection(selection, desiredHeight, &longH);
+                if (shot) {
+                    RunEditorModal(shot, RectWidth(selection), longH);
+                    DeleteObject(shot);
+                } else {
+                    NotifyAction(g_hiddenWindow, L"Long capture failed",
+                                 L"Could not stitch this area. Try a taller visible content area.");
+                }
+            }
+        } else {
+            HBITMAP shot = CropCapture(capture, selection);
+            if (shot) {
+                RunEditorModal(shot, RectWidth(selection), RectHeight(selection));
+                DeleteObject(shot);
+            }
         }
     }
-    DeleteObject(capture.bitmap);
+    if (capture.bitmap) {
+        DeleteObject(capture.bitmap);
+    }
     g_captureActive = false;
+}
+
+static void RunCapture() {
+    RunSelectedCapture(CaptureRegion);
 }
 
 static void SendWheelDownAt(POINT point, HWND target) {
@@ -1616,12 +1990,13 @@ static void SendWheelDownAt(POINT point, HWND target) {
     Sleep(kLongCaptureScrollDelayMs);
 }
 
-static HBITMAP CaptureLongSelection(const RECT &selection, int *outH) {
+static HBITMAP CaptureLongSelection(const RECT &selection, int desiredHeight, int *outH) {
     int w = RectWidth(selection);
     int h = RectHeight(selection);
     if (w <= 16 || h <= 16) {
         return NULL;
     }
+    desiredHeight = Clamp(desiredHeight, h, kLongCaptureMaxHeight);
 
     POINT center = {selection.left + w / 2, selection.top + h / 2};
     HWND target = WindowFromPoint(center);
@@ -1643,7 +2018,7 @@ static HBITMAP CaptureLongSelection(const RECT &selection, int *outH) {
     frames.push_back({first, 0, h});
     totalH = h;
 
-    for (int i = 1; i < kLongCaptureMaxFrames && totalH < kLongCaptureMaxHeight; ++i) {
+    for (int i = 1; i < kLongCaptureMaxFrames && totalH < desiredHeight; ++i) {
         SendWheelDownAt(center, target);
         HBITMAP next = CaptureScreenRect(selection);
         std::vector<BYTE> nextPixels;
@@ -1665,8 +2040,8 @@ static HBITMAP CaptureLongSelection(const RECT &selection, int *outH) {
             DeleteObject(next);
             break;
         }
-        if (totalH + copyH > kLongCaptureMaxHeight) {
-            copyH = kLongCaptureMaxHeight - totalH;
+        if (totalH + copyH > desiredHeight) {
+            copyH = desiredHeight - totalH;
         }
         if (copyH <= 0) {
             DeleteObject(next);
@@ -1688,39 +2063,7 @@ static HBITMAP CaptureLongSelection(const RECT &selection, int *outH) {
 }
 
 static void RunLongCapture() {
-    if (g_captureActive) {
-        return;
-    }
-
-    g_captureActive = true;
-    NotifyAction(g_hiddenWindow, L"Long capture", L"Drag the visible scroll area. The app will scroll and stitch it.");
-    ScreenCapture capture = CaptureVirtualScreen();
-    if (!capture.bitmap) {
-        g_captureActive = false;
-        return;
-    }
-
-    RECT selection;
-    if (RunSelectionOverlay(capture, &selection)) {
-        DeleteObject(capture.bitmap);
-        capture.bitmap = NULL;
-        Sleep(120);
-
-        int longH = 0;
-        HBITMAP shot = CaptureLongSelection(selection, &longH);
-        if (shot) {
-            RunEditorModal(shot, RectWidth(selection), longH);
-            DeleteObject(shot);
-        } else {
-            NotifyAction(g_hiddenWindow, L"Long capture failed",
-                         L"Could not stitch this area. Try a taller visible content area.");
-        }
-    }
-
-    if (capture.bitmap) {
-        DeleteObject(capture.bitmap);
-    }
-    g_captureActive = false;
+    RunSelectedCapture(CaptureLongRegion);
 }
 
 static bool SelfTestExport(const std::wstring &path) {
@@ -1930,11 +2273,14 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPA
         SendDlgItemMessageW(hwnd, kSettingsAlt, BM_SETCHECK, (g_settings.modifiers & MOD_ALT) ? BST_CHECKED : BST_UNCHECKED, 0);
         SendDlgItemMessageW(hwnd, kSettingsShift, BM_SETCHECK, (g_settings.modifiers & MOD_SHIFT) ? BST_CHECKED : BST_UNCHECKED, 0);
         SendDlgItemMessageW(hwnd, kSettingsWin, BM_SETCHECK, (g_settings.modifiers & MOD_WIN) ? BST_CHECKED : BST_UNCHECKED, 0);
-        CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 22, 132, 320, 24,
+        CreateWindowW(L"BUTTON", L"Start with Windows", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 22, 132, 220, 24,
+                      hwnd, reinterpret_cast<HMENU>(kSettingsStartup), g_instance, NULL);
+        SendDlgItemMessageW(hwnd, kSettingsStartup, BM_SETCHECK, IsStartupEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+        CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 22, 166, 320, 24,
                       hwnd, reinterpret_cast<HMENU>(kSettingsStatus), g_instance, NULL);
-        CreateWindowW(L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 154, 172, 82, 32,
+        CreateWindowW(L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 154, 206, 82, 32,
                       hwnd, reinterpret_cast<HMENU>(kSettingsApply), g_instance, NULL);
-        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE, 244, 172, 82, 32,
+        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE, 244, 206, 82, 32,
                       hwnd, reinterpret_cast<HMENU>(kSettingsCancel), g_instance, NULL);
         UpdateSettingsStatus(hwnd, L"Current: " + HotkeyText(g_settings));
         return 0;
@@ -1945,8 +2291,15 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPA
             g_settings = ReadSettingsControls(hwnd);
             if (RegisterConfiguredHotkey(g_hiddenWindow, false)) {
                 SaveSettings();
-                ShowTrayBalloon(g_hiddenWindow, L"Hotkey updated", HotkeyText(g_settings));
-                DestroyWindow(hwnd);
+                bool startup = SendDlgItemMessageW(hwnd, kSettingsStartup, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                if (SetStartupEnabled(startup)) {
+                    ShowTrayBalloon(g_hiddenWindow, L"Settings updated", HotkeyText(g_settings));
+                    DestroyWindow(hwnd);
+                } else {
+                    UpdateSettingsStatus(hwnd, L"Could not update startup setting");
+                    MessageBoxW(hwnd, L"Could not update the Windows startup setting.",
+                                L"ModernScreenshot", MB_ICONWARNING);
+                }
             } else {
                 g_settings = old;
                 RegisterConfiguredHotkey(g_hiddenWindow, false);
@@ -1985,7 +2338,7 @@ static void ShowSettingsWindow() {
 
     g_settingsWindow = CreateWindowExW(WS_EX_TOOLWINDOW, kSettingsClass, L"ModernScreenshot Settings",
                                        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
-                                       370, 260, NULL, NULL, g_instance, NULL);
+                                       370, 300, NULL, NULL, g_instance, NULL);
     if (g_settingsWindow) {
         ShowWindow(g_settingsWindow, SW_SHOW);
         SetForegroundWindow(g_settingsWindow);
@@ -2058,6 +2411,14 @@ static void RegisterWindowClasses() {
     overlay.hbrBackground = NULL;
     overlay.lpszClassName = kOverlayClass;
     RegisterClassW(&overlay);
+
+    WNDCLASSW length = {};
+    length.lpfnWndProc = LengthProc;
+    length.hInstance = g_instance;
+    length.hCursor = LoadCursor(NULL, IDC_SIZENS);
+    length.hbrBackground = NULL;
+    length.lpszClassName = kLengthClass;
+    RegisterClassW(&length);
 
     WNDCLASSW editor = {};
     editor.lpfnWndProc = EditorProc;

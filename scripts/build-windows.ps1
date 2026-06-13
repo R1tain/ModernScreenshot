@@ -34,6 +34,7 @@ $CommonArgs = @(
     "gdi32.lib",
     "gdiplus.lib",
     "shell32.lib",
+    "advapi32.lib",
     "ole32.lib",
     "uuid.lib"
 )
