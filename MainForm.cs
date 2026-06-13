@@ -8,7 +8,6 @@ namespace ModernScreenshot
     public partial class MainForm : Form
     {
         private NotifyIcon? trayIcon;
-        private GlobalHotkey? hotkey;
 
         [DllImport("user32.dll")]
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
