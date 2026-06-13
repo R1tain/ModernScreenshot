@@ -1,0 +1,13 @@
+[Unit]
+Description=Modern Screenshot hotkey daemon
+Documentation=https://github.com/R1tain/ModernScreenshot
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/modern-screenshot
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
