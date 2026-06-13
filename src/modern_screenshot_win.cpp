@@ -64,8 +64,8 @@ static const int kEditorMargin = 80;
 static const int kLongCaptureMaxFrames = 24;
 static const int kLongCaptureMaxHeight = 20000;
 static const int kLongCapturePollMs = 180;
-static const int kLongSessionW = 340;
-static const int kLongSessionH = 112;
+static const int kLongSessionW = 360;
+static const int kLongSessionH = 520;
 static const int kSettingsApply = 3001;
 static const int kSettingsCancel = 3002;
 static const int kSettingsCtrl = 3003;
@@ -1282,6 +1282,80 @@ static void LongPanelPosition(const RECT &selection, int *outX, int *outY) {
     *outY = Clamp(selection.top, vy + 8, vy + vh - kLongSessionH - 8);
 }
 
+static RECT LongDoneRect() {
+    return {176, 470, 256, 504};
+}
+
+static RECT LongCancelRect() {
+    return {266, 470, 346, 504};
+}
+
+static void DrawLongPreview(LongSessionState *state, HDC dc, const RECT &preview) {
+    FillRectColor(dc, preview, RGB(7, 11, 14));
+    if (!state || state->frames.empty() || state->w <= 0 || state->totalH <= 0) {
+        DrawCenteredText(dc, L"Preview will appear after the first frame", preview, -13, FW_MEDIUM, RGB(112, 130, 132));
+        return;
+    }
+
+    int padding = 8;
+    RECT content = {preview.left + padding, preview.top + padding, preview.right - padding, preview.bottom - padding};
+    int contentW = RectWidth(content);
+    int contentH = RectHeight(content);
+    if (contentW <= 0 || contentH <= 0) {
+        return;
+    }
+
+    int drawW = contentW;
+    int drawH = std::max(1, state->totalH * drawW / state->w);
+    if (drawH < contentH && state->totalH > 0) {
+        drawH = std::min(contentH, drawH);
+    }
+    int drawX = content.left;
+    int drawY = content.bottom - drawH;
+    int y = drawY;
+
+    HDC source = CreateCompatibleDC(dc);
+    if (!source) {
+        return;
+    }
+
+    int visibleTop = std::max(0, drawH - contentH);
+    int scaledY = 0;
+    for (const LongFrame &frame : state->frames) {
+        int frameScaledH = std::max(1, frame.copyH * drawW / state->w);
+        int destTop = y + scaledY - visibleTop;
+        int destBottom = destTop + frameScaledH;
+        if (destBottom > content.top && destTop < content.bottom) {
+            int clippedTop = std::max(destTop, static_cast<int>(content.top));
+            int clippedBottom = std::min(destBottom, static_cast<int>(content.bottom));
+            int clippedH = clippedBottom - clippedTop;
+            int srcY = frame.sourceY + std::max(0, (clippedTop - destTop) * frame.copyH / frameScaledH);
+            int srcH = std::max(1, clippedH * frame.copyH / frameScaledH);
+            HGDIOBJ oldSource = SelectObject(source, frame.bitmap);
+            SetStretchBltMode(dc, HALFTONE);
+            StretchBlt(dc, drawX, clippedTop, drawW, clippedH,
+                       source, 0, srcY, state->w, srcH, SRCCOPY);
+            SelectObject(source, oldSource);
+        }
+        scaledY += frameScaledH;
+    }
+
+    DeleteDC(source);
+
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        Pen border(Color(210, 82, 98, 100), 1.0f);
+        graphics.DrawRectangle(&border, preview.left, preview.top, RectWidth(preview) - 1, RectHeight(preview) - 1);
+        SolidBrush fade(Color(150, 7, 11, 14));
+        graphics.FillRectangle(&fade, preview.left + 1, preview.top + 1, RectWidth(preview) - 2, 26);
+    }
+
+    wchar_t label[96];
+    wsprintfW(label, L"Live preview  %d x %d", state->w, state->totalH);
+    DrawTextLabel(dc, label, preview.left + 12, preview.top + 7, RGB(245, 251, 248));
+}
+
 static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
     RECT rect;
     GetClientRect(hwnd, &rect);
@@ -1301,8 +1375,11 @@ static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
     DrawTextLabel(dc, status, 14, 12, RGB(245, 251, 248));
     DrawTextLabel(dc, L"Scroll the page, then click Done.", 14, 34, RGB(188, 202, 200));
 
-    RECT done = {150, 62, 232, 96};
-    RECT cancel = {242, 62, 324, 96};
+    RECT preview = {14, 62, 346, 458};
+    DrawLongPreview(state, dc, preview);
+
+    RECT done = LongDoneRect();
+    RECT cancel = LongCancelRect();
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -1389,8 +1466,8 @@ static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, 
         if (state) {
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
-            RECT done = {150, 62, 232, 96};
-            RECT cancel = {242, 62, 324, 96};
+            RECT done = LongDoneRect();
+            RECT cancel = LongCancelRect();
             if (PointInRect(x, y, done)) {
                 state->done = true;
                 DestroyWindow(hwnd);
