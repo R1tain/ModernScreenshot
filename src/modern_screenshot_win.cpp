@@ -47,7 +47,7 @@ using Gdiplus::UnitPixel;
 static const wchar_t *kVersion = WIDEN(VERSION);
 static const wchar_t *kHiddenClass = L"ModernScreenshotHidden";
 static const wchar_t *kOverlayClass = L"ModernScreenshotOverlay";
-static const wchar_t *kLengthClass = L"ModernScreenshotLength";
+static const wchar_t *kLongSessionClass = L"ModernScreenshotLongSession";
 static const wchar_t *kEditorClass = L"ModernScreenshotEditor";
 static const wchar_t *kSettingsClass = L"ModernScreenshotSettings";
 static const int kHotkeyId = 1001;
@@ -61,10 +61,11 @@ static const int kButtonW = 58;
 static const int kButtonH = 46;
 static const int kButtonGap = 8;
 static const int kEditorMargin = 80;
-static const int kLongCaptureMaxFrames = 8;
+static const int kLongCaptureMaxFrames = 24;
 static const int kLongCaptureMaxHeight = 20000;
-static const int kLongCaptureWheelNotches = 7;
-static const int kLongCaptureScrollDelayMs = 260;
+static const int kLongCapturePollMs = 180;
+static const int kLongSessionW = 340;
+static const int kLongSessionH = 112;
 static const int kSettingsApply = 3001;
 static const int kSettingsCancel = 3002;
 static const int kSettingsCtrl = 3003;
@@ -77,7 +78,8 @@ static const int kSettingsStartup = 3009;
 static const int kOverlayModeW = 116;
 static const int kOverlayModeH = 34;
 static const int kOverlayModeGap = 8;
-static const int kLengthMin = 120;
+static const int kLongSessionDone = 4101;
+static const int kLongSessionCancel = 4102;
 
 enum Tool {
     ToolBlur,
@@ -141,13 +143,18 @@ struct OverlayState {
     RECT selection = {0, 0, 0, 0};
 };
 
-struct LengthState {
-    ScreenCapture capture;
+struct LongSessionState {
     RECT selection = {0, 0, 0, 0};
-    bool dragging = false;
     bool done = false;
     bool cancelled = false;
-    int length = 0;
+    bool hasPrev = false;
+    int w = 0;
+    int h = 0;
+    int totalH = 0;
+    HWND target = NULL;
+    HWND targetRoot = NULL;
+    std::vector<LongFrame> frames;
+    std::vector<BYTE> prevPixels;
 };
 
 struct EditorState {
@@ -189,9 +196,10 @@ static HICON g_trayIcon = NULL;
 static Settings g_settings;
 static bool g_hotkeyRegistered = false;
 static bool g_captureActive = false;
+static LongSessionState *g_longSession = NULL;
+static HHOOK g_longMouseHook = NULL;
 
 static void ShowTrayBalloon(HWND hwnd, const std::wstring &title, const std::wstring &message);
-static HBITMAP CaptureLongSelection(const RECT &selection, int desiredHeight, int *outH);
 
 static const ButtonSpec kButtons[] = {
     {ActionToolBlur, ToolBlur, L"Blur"},
@@ -285,6 +293,15 @@ static RECT OverlayModeRect(int index) {
 
 static bool PointInRect(int x, int y, const RECT &rect) {
     return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+}
+
+static bool RectIntersects(const RECT &a, const RECT &b) {
+    RECT intersection;
+    return IntersectRect(&intersection, &a, &b) != FALSE;
+}
+
+static HWND RootWindow(HWND hwnd) {
+    return hwnd ? GetAncestor(hwnd, GA_ROOT) : NULL;
 }
 
 static CaptureKind OverlayModeAt(int x, int y, bool *hit) {
@@ -820,7 +837,7 @@ static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offset
     if (state->showModeButtons) {
         DrawOverlayModeButton(dc, OverlayModeRect(0), L"Screenshot", state->kind == CaptureRegion, offsetX, offsetY);
         DrawOverlayModeButton(dc, OverlayModeRect(1), L"Long", state->kind == CaptureLongRegion, offsetX, offsetY);
-        DrawTextLabel(dc, state->kind == CaptureLongRegion ? L"Drag scroll area, then choose scroll length" : L"Drag to capture region",
+        DrawTextLabel(dc, state->kind == CaptureLongRegion ? L"Drag scroll area, then scroll the page" : L"Drag to capture region",
                       16 - offsetX, 58 - offsetY, RGB(245, 251, 248));
     }
 
@@ -1063,211 +1080,408 @@ static bool RunSelectionOverlay(const ScreenCapture &capture, RECT *selection, C
     return true;
 }
 
-static void UpdateLengthFromPoint(LengthState *state, int y) {
-    int minLength = std::max(kLengthMin, RectHeight(state->selection));
-    state->length = Clamp(y - state->selection.top, minLength, kLongCaptureMaxHeight);
+static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BYTE> *pixels) {
+    if (!state || !bitmap || !pixels) {
+        return false;
+    }
+
+    if (!state->hasPrev) {
+        state->frames.push_back({bitmap, 0, state->h});
+        state->prevPixels.swap(*pixels);
+        state->totalH = state->h;
+        state->hasPrev = true;
+        return true;
+    }
+
+    if (AverageFrameDiff(state->prevPixels, *pixels, state->w, state->h) <= 8) {
+        DeleteObject(bitmap);
+        return false;
+    }
+
+    int overlap = EstimateOverlap(state->prevPixels, *pixels, state->w, state->h);
+    int copyH = state->h - overlap;
+    if (copyH < 32 || state->totalH >= kLongCaptureMaxHeight ||
+        static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
+        DeleteObject(bitmap);
+        return false;
+    }
+    if (state->totalH + copyH > kLongCaptureMaxHeight) {
+        copyH = kLongCaptureMaxHeight - state->totalH;
+    }
+    if (copyH <= 0) {
+        DeleteObject(bitmap);
+        return false;
+    }
+
+    state->frames.push_back({bitmap, overlap, copyH});
+    state->totalH += copyH;
+    state->prevPixels.swap(*pixels);
+    return true;
 }
 
-static void DrawLengthOverlayOffset(LengthState *state, HWND hwnd, HDC dc, int offsetX, int offsetY) {
-    HDC source = CreateCompatibleDC(dc);
-    HGDIOBJ old = SelectObject(source, state->capture.bitmap);
-    BitBlt(dc, -offsetX, -offsetY, state->capture.w, state->capture.h, source, 0, 0, SRCCOPY);
-
-    if (StartGdiplus()) {
-        Graphics graphics(dc);
-        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        SolidBrush shade(Color(150, 7, 11, 14));
-        graphics.FillRectangle(&shade, 0, 0, state->capture.w, state->capture.h);
-    }
-
-    RECT selected = state->selection;
-    BitBlt(dc, selected.left - offsetX, selected.top - offsetY, RectWidth(selected), RectHeight(selected),
-           source, selected.left, selected.top, SRCCOPY);
-
-    if (StartGdiplus()) {
-        Graphics graphics(dc);
-        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        Pen accent(Color(255, 23, 198, 163), 2.4f);
-        Pen yellow(Color(255, 255, 207, 90), 3.0f);
-        int left = selected.left - offsetX;
-        int top = selected.top - offsetY;
-        int right = selected.right - offsetX;
-        graphics.DrawRectangle(&accent, left, top, RectWidth(selected), RectHeight(selected));
-
-        int markerX = right + 18;
-        if (markerX > state->capture.w - offsetX - 28) {
-            markerX = left - 18;
+static bool SampleLongSelection(LongSessionState *state) {
+    HBITMAP bitmap = CaptureScreenRect(state->selection);
+    std::vector<BYTE> pixels;
+    if (!bitmap || !ReadBitmapPixels(bitmap, state->w, state->h, &pixels)) {
+        if (bitmap) {
+            DeleteObject(bitmap);
         }
-        int markerStart = top;
-        int visibleLength = std::min<int>(state->length, state->capture.h - selected.top - 28);
-        int markerEnd = selected.top + visibleLength - offsetY;
-        markerEnd = std::max(markerStart + 32, markerEnd);
-        graphics.DrawLine(&yellow, markerX, markerStart, markerX, markerEnd);
-        graphics.DrawLine(&yellow, markerX, markerEnd, markerX - 7, markerEnd - 10);
-        graphics.DrawLine(&yellow, markerX, markerEnd, markerX + 7, markerEnd - 10);
+        return false;
+    }
+    return AddLongFrame(state, bitmap, &pixels);
+}
+
+static WORD CurrentMouseKeyState() {
+    WORD keys = 0;
+    if (GetKeyState(VK_LBUTTON) < 0) {
+        keys |= MK_LBUTTON;
+    }
+    if (GetKeyState(VK_RBUTTON) < 0) {
+        keys |= MK_RBUTTON;
+    }
+    if (GetKeyState(VK_MBUTTON) < 0) {
+        keys |= MK_MBUTTON;
+    }
+    if (GetKeyState(VK_XBUTTON1) < 0) {
+        keys |= MK_XBUTTON1;
+    }
+    if (GetKeyState(VK_XBUTTON2) < 0) {
+        keys |= MK_XBUTTON2;
+    }
+    if (GetKeyState(VK_SHIFT) < 0) {
+        keys |= MK_SHIFT;
+    }
+    if (GetKeyState(VK_CONTROL) < 0) {
+        keys |= MK_CONTROL;
+    }
+    return keys;
+}
+
+static bool IsOwnWindow(HWND hwnd) {
+    while (hwnd) {
+        wchar_t className[96] = {};
+        GetClassNameW(hwnd, className, 96);
+        if (wcscmp(className, kHiddenClass) == 0 || wcscmp(className, kOverlayClass) == 0 ||
+            wcscmp(className, kLongSessionClass) == 0 || wcscmp(className, kEditorClass) == 0 ||
+            wcscmp(className, kSettingsClass) == 0) {
+            return true;
+        }
+        hwnd = GetParent(hwnd);
+    }
+    return false;
+}
+
+static HWND WindowAtPointForScroll(POINT point, HWND fallback) {
+    HWND hwnd = WindowFromPoint(point);
+    if (hwnd && !IsOwnWindow(hwnd)) {
+        return hwnd;
+    }
+    return fallback;
+}
+
+static void FocusLongTarget(LongSessionState *state) {
+    if (!state || !state->targetRoot || !IsWindow(state->targetRoot)) {
+        return;
+    }
+    if (IsIconic(state->targetRoot)) {
+        ShowWindow(state->targetRoot, SW_RESTORE);
+    }
+    SetForegroundWindow(state->targetRoot);
+}
+
+static bool ForwardLongWheel(LongSessionState *state, const MSLLHOOKSTRUCT *mouse) {
+    if (!state || !mouse || state->done || state->cancelled) {
+        return false;
+    }
+    if (!PointInRect(mouse->pt.x, mouse->pt.y, state->selection)) {
+        return false;
     }
 
-    wchar_t lengthText[96];
-    wsprintfW(lengthText, L"Scroll length: %d px", state->length);
-    RECT pill = {selected.left, selected.top - 34, selected.left + 190, selected.top - 6};
-    if (pill.top < 8) {
-        OffsetRect(&pill, 0, RectHeight(selected) + 42);
+    HWND target = WindowAtPointForScroll(mouse->pt, state->target);
+    if (!target || !IsWindow(target)) {
+        return false;
     }
-    RECT drawPill = {pill.left - offsetX, pill.top - offsetY, pill.right - offsetX, pill.bottom - offsetY};
+
+    HWND root = RootWindow(target);
+    if (root && !IsOwnWindow(root)) {
+        state->targetRoot = root;
+    }
+    FocusLongTarget(state);
+
+    int delta = GET_WHEEL_DELTA_WPARAM(mouse->mouseData);
+    WPARAM wheelParam = MAKEWPARAM(CurrentMouseKeyState(), static_cast<WORD>(delta));
+    LPARAM pointParam = MAKELPARAM(static_cast<SHORT>(mouse->pt.x), static_cast<SHORT>(mouse->pt.y));
+    PostMessageW(target, WM_MOUSEWHEEL, wheelParam, pointParam);
+    return true;
+}
+
+static LRESULT CALLBACK LongMouseHookProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HC_ACTION && wParam == WM_MOUSEWHEEL && g_longSession) {
+        const MSLLHOOKSTRUCT *mouse = reinterpret_cast<const MSLLHOOKSTRUCT *>(lParam);
+        if (ForwardLongWheel(g_longSession, mouse)) {
+            return 1;
+        }
+    }
+    return CallNextHookEx(g_longMouseHook, code, wParam, lParam);
+}
+
+static void StartLongMouseHook(LongSessionState *state) {
+    g_longSession = state;
+    if (!g_longMouseHook) {
+        g_longMouseHook = SetWindowsHookExW(WH_MOUSE_LL, LongMouseHookProc, g_instance, 0);
+    }
+}
+
+static void StopLongMouseHook() {
+    if (g_longMouseHook) {
+        UnhookWindowsHookEx(g_longMouseHook);
+        g_longMouseHook = NULL;
+    }
+    g_longSession = NULL;
+}
+
+static bool CandidateLongPanelPosition(const RECT &selection, int x, int y, int *outX, int *outY) {
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    x = Clamp(x, vx + 8, vx + vw - kLongSessionW - 8);
+    y = Clamp(y, vy + 8, vy + vh - kLongSessionH - 8);
+
+    RECT panel = {x, y, x + kLongSessionW, y + kLongSessionH};
+    if (RectIntersects(panel, selection)) {
+        return false;
+    }
+    *outX = x;
+    *outY = y;
+    return true;
+}
+
+static void LongPanelPosition(const RECT &selection, int *outX, int *outY) {
+    const int gap = 16;
+    int candidates[][2] = {
+        {selection.right + gap, selection.top},
+        {selection.left - kLongSessionW - gap, selection.top},
+        {selection.right + gap, selection.bottom - kLongSessionH},
+        {selection.left - kLongSessionW - gap, selection.bottom - kLongSessionH},
+        {selection.left, selection.bottom + gap},
+        {selection.left, selection.top - kLongSessionH - gap},
+    };
+
+    for (const auto &candidate : candidates) {
+        if (CandidateLongPanelPosition(selection, candidate[0], candidate[1], outX, outY)) {
+            return;
+        }
+    }
+
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    *outX = Clamp(selection.right + gap, vx + 8, vx + vw - kLongSessionW - 8);
+    *outY = Clamp(selection.top, vy + 8, vy + vh - kLongSessionH - 8);
+}
+
+static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
+    RECT rect;
+    GetClientRect(hwnd, &rect);
+    FillRectColor(dc, rect, RGB(16, 21, 24));
+
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        GraphicsPath path;
-        BuildRoundedRectPath(&path, static_cast<float>(drawPill.left), static_cast<float>(drawPill.top),
-                             static_cast<float>(RectWidth(drawPill)), static_cast<float>(RectHeight(drawPill)), 8.0f);
-        SolidBrush brush(Color(238, 16, 21, 24));
-        graphics.FillPath(&brush, &path);
+        SolidBrush panel(Color(245, 16, 21, 24));
+        graphics.FillRectangle(&panel, 0, 0, RectWidth(rect), RectHeight(rect));
+        Pen border(Color(160, 23, 198, 163), 1.2f);
+        graphics.DrawRectangle(&border, 0, 0, RectWidth(rect) - 1, RectHeight(rect) - 1);
+    }
+
+    wchar_t status[128];
+    wsprintfW(status, L"Long capture  %d frames  %d px", static_cast<int>(state->frames.size()), state->totalH);
+    DrawTextLabel(dc, status, 14, 12, RGB(245, 251, 248));
+    DrawTextLabel(dc, L"Scroll the page, then click Done.", 14, 34, RGB(188, 202, 200));
+
+    RECT done = {150, 62, 232, 96};
+    RECT cancel = {242, 62, 324, 96};
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        GraphicsPath donePath;
+        BuildRoundedRectPath(&donePath, static_cast<float>(done.left), static_cast<float>(done.top),
+                             static_cast<float>(RectWidth(done)), static_cast<float>(RectHeight(done)), 9.0f);
+        SolidBrush doneFill(Color(255, 23, 198, 163));
+        graphics.FillPath(&doneFill, &donePath);
+        GraphicsPath cancelPath;
+        BuildRoundedRectPath(&cancelPath, static_cast<float>(cancel.left), static_cast<float>(cancel.top),
+                             static_cast<float>(RectWidth(cancel)), static_cast<float>(RectHeight(cancel)), 9.0f);
+        SolidBrush cancelFill(Color(255, 36, 45, 48));
+        graphics.FillPath(&cancelFill, &cancelPath);
     } else {
-        FillRectColor(dc, drawPill, RGB(16, 21, 24));
+        FillRectColor(dc, done, RGB(23, 198, 163));
+        FillRectColor(dc, cancel, RGB(36, 45, 48));
     }
-    DrawTextLabel(dc, lengthText, drawPill.left + 10, drawPill.top + 5, RGB(245, 251, 248));
-    DrawTextLabel(dc, L"Drag down to choose length. Wheel adjusts. Enter starts. Esc cancels.",
-                  16 - offsetX, 18 - offsetY, RGB(245, 251, 248));
-
-    SelectObject(source, old);
-    DeleteDC(source);
-    (void)hwnd;
+    DrawCenteredText(dc, L"Done", done, -14, FW_SEMIBOLD, RGB(7, 11, 14));
+    DrawCenteredText(dc, L"Cancel", cancel, -14, FW_SEMIBOLD, RGB(245, 251, 248));
 }
 
-static void PaintLengthBuffered(LengthState *state, HWND hwnd, HDC dc, const RECT &paint) {
-    int w = RectWidth(paint);
-    int h = RectHeight(paint);
-    if (!state || w <= 0 || h <= 0) {
-        return;
-    }
-
-    HDC memory = CreateCompatibleDC(dc);
-    HBITMAP buffer = CreateCompatibleBitmap(dc, w, h);
-    if (!memory || !buffer) {
-        if (buffer) {
-            DeleteObject(buffer);
-        }
-        if (memory) {
-            DeleteDC(memory);
-        }
-        DrawLengthOverlayOffset(state, hwnd, dc, 0, 0);
-        return;
-    }
-
-    HGDIOBJ old = SelectObject(memory, buffer);
-    DrawLengthOverlayOffset(state, hwnd, memory, paint.left, paint.top);
-    BitBlt(dc, paint.left, paint.top, w, h, memory, 0, 0, SRCCOPY);
-    SelectObject(memory, old);
-    DeleteObject(buffer);
-    DeleteDC(memory);
-}
-
-static LRESULT CALLBACK LengthProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    LengthState *state = reinterpret_cast<LengthState *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+static LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    LongSessionState *state = reinterpret_cast<LongSessionState *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
     switch (message) {
     case WM_CREATE: {
         CREATESTRUCTW *create = reinterpret_cast<CREATESTRUCTW *>(lParam);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
-        SetCursor(LoadCursor(NULL, IDC_SIZENS));
+        state = reinterpret_cast<LongSessionState *>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        SetTimer(hwnd, 1, kLongCapturePollMs, NULL);
         return 0;
     }
-    case WM_ERASEBKGND:
-        return 1;
-    case WM_SETCURSOR:
-        SetCursor(LoadCursor(NULL, IDC_SIZENS));
-        return TRUE;
-    case WM_KEYDOWN:
-        if (!state) {
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_TIMER:
+        if (state) {
+            SampleLongSelection(state);
+            InvalidateRect(hwnd, NULL, FALSE);
+            if (state->totalH >= kLongCaptureMaxHeight ||
+                static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
+                state->done = true;
+                DestroyWindow(hwnd);
+            }
+        }
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == kLongSessionDone && state) {
+            state->done = true;
+            DestroyWindow(hwnd);
             return 0;
         }
-        if (wParam == VK_ESCAPE) {
+        if (LOWORD(wParam) == kLongSessionCancel && state) {
             state->cancelled = true;
             state->done = true;
             DestroyWindow(hwnd);
             return 0;
         }
-        if (wParam == VK_RETURN) {
+        break;
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN && state) {
             state->done = true;
             DestroyWindow(hwnd);
             return 0;
         }
-        return 0;
-    case WM_LBUTTONDOWN:
-        if (state) {
-            SetCapture(hwnd);
-            state->dragging = true;
-            UpdateLengthFromPoint(state, GET_Y_LPARAM(lParam));
-            InvalidateRect(hwnd, NULL, FALSE);
-        }
-        return 0;
-    case WM_MOUSEMOVE:
-        if (state && state->dragging) {
-            UpdateLengthFromPoint(state, GET_Y_LPARAM(lParam));
-            InvalidateRect(hwnd, NULL, FALSE);
-        }
-        return 0;
-    case WM_LBUTTONUP:
-        if (state && state->dragging) {
-            ReleaseCapture();
-            UpdateLengthFromPoint(state, GET_Y_LPARAM(lParam));
+        if (wParam == VK_ESCAPE && state) {
+            state->cancelled = true;
             state->done = true;
             DestroyWindow(hwnd);
+            return 0;
         }
-        return 0;
+        break;
     case WM_MOUSEWHEEL:
         if (state) {
-            int step = std::max(80, RectHeight(state->selection) / 3);
-            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
-            int minLength = std::max(kLengthMin, RectHeight(state->selection));
-            state->length = Clamp(state->length + (delta < 0 ? step : -step), minLength, kLongCaptureMaxHeight);
-            InvalidateRect(hwnd, NULL, FALSE);
+            POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            MSLLHOOKSTRUCT mouse = {};
+            mouse.pt = point;
+            mouse.mouseData = MAKELONG(0, static_cast<WORD>(GET_WHEEL_DELTA_WPARAM(wParam)));
+            if (ForwardLongWheel(state, &mouse)) {
+                return 0;
+            }
+        }
+        break;
+    case WM_LBUTTONDOWN:
+        if (state) {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            RECT done = {150, 62, 232, 96};
+            RECT cancel = {242, 62, 324, 96};
+            if (PointInRect(x, y, done)) {
+                state->done = true;
+                DestroyWindow(hwnd);
+            } else if (PointInRect(x, y, cancel)) {
+                state->cancelled = true;
+                state->done = true;
+                DestroyWindow(hwnd);
+            } else {
+                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            }
         }
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
         if (state) {
-            PaintLengthBuffered(state, hwnd, dc, ps.rcPaint);
+            DrawLongSession(hwnd, state, dc);
         }
         EndPaint(hwnd, &ps);
         return 0;
     }
+    case WM_CLOSE:
+        if (state) {
+            state->done = true;
+        }
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        KillTimer(hwnd, 1);
+        return 0;
     }
 
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-static bool RunLengthOverlay(const ScreenCapture &capture, const RECT &selection, int *scrollLength) {
-    LengthState state;
-    state.capture = capture;
-    state.selection = {selection.left - capture.x, selection.top - capture.y,
-                       selection.right - capture.x, selection.bottom - capture.y};
-    state.length = std::max(kLengthMin, RectHeight(state.selection));
-
-    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kLengthClass, L"Modern Screenshot Length",
-                                WS_POPUP, capture.x, capture.y, capture.w, capture.h,
-                                NULL, NULL, g_instance, &state);
-    if (!hwnd) {
-        return false;
+static HBITMAP RunLongSession(const RECT &selection, HWND preferredTarget, int *outH) {
+    LongSessionState state;
+    state.selection = selection;
+    state.w = RectWidth(selection);
+    state.h = RectHeight(selection);
+    state.totalH = 0;
+    POINT center = {selection.left + state.w / 2, selection.top + state.h / 2};
+    state.target = WindowAtPointForScroll(center, preferredTarget);
+    state.targetRoot = RootWindow(state.target);
+    if (!state.targetRoot && preferredTarget && IsWindow(preferredTarget)) {
+        state.targetRoot = RootWindow(preferredTarget);
+        state.target = preferredTarget;
     }
 
-    ShowWindow(hwnd, SW_SHOW);
+    if (state.w <= 16 || state.h <= 16 || !SampleLongSelection(&state)) {
+        return NULL;
+    }
+
+    FocusLongTarget(&state);
+    SetCursorPos(center.x, center.y);
+
+    int x = 0;
+    int y = 0;
+    LongPanelPosition(selection, &x, &y);
+
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                                kLongSessionClass, L"ModernScreenshot Long Capture",
+                                WS_POPUP, x, y, kLongSessionW, kLongSessionH, NULL, NULL, g_instance, &state);
+    if (!hwnd) {
+        for (LongFrame &frame : state.frames) {
+            DeleteObject(frame.bitmap);
+        }
+        return NULL;
+    }
+
+    StartLongMouseHook(&state);
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     UpdateWindow(hwnd);
-    SetForegroundWindow(hwnd);
-    SetFocus(hwnd);
+    FocusLongTarget(&state);
+    SetCursorPos(center.x, center.y);
 
     MSG msg;
     while (!state.done && GetMessageW(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    StopLongMouseHook();
 
-    if (state.cancelled || state.length < kLengthMin) {
-        return false;
+    HBITMAP stitched = NULL;
+    if (!state.cancelled) {
+        stitched = StitchLongFrames(state.frames, state.w, outH);
     }
-    *scrollLength = state.length;
-    return true;
+    for (LongFrame &frame : state.frames) {
+        DeleteObject(frame.bitmap);
+    }
+    return stitched;
 }
 
 static bool PointInImage(EditorState *state, int x, int y) {
@@ -1930,6 +2144,7 @@ static void RunSelectedCapture(CaptureKind initialKind) {
         return;
     }
     g_captureActive = true;
+    HWND previousForeground = GetForegroundWindow();
     ScreenCapture capture = CaptureVirtualScreen();
     if (!capture.bitmap) {
         g_captureActive = false;
@@ -1940,21 +2155,18 @@ static void RunSelectedCapture(CaptureKind initialKind) {
     CaptureKind kind = initialKind;
     if (RunSelectionOverlay(capture, &selection, &kind, true, initialKind)) {
         if (kind == CaptureLongRegion) {
-            int desiredHeight = 0;
-            if (RunLengthOverlay(capture, selection, &desiredHeight)) {
-                DeleteObject(capture.bitmap);
-                capture.bitmap = NULL;
-                Sleep(120);
+            DeleteObject(capture.bitmap);
+            capture.bitmap = NULL;
+            Sleep(120);
 
-                int longH = 0;
-                HBITMAP shot = CaptureLongSelection(selection, desiredHeight, &longH);
-                if (shot) {
-                    RunEditorModal(shot, RectWidth(selection), longH);
-                    DeleteObject(shot);
-                } else {
-                    NotifyAction(g_hiddenWindow, L"Long capture failed",
-                                 L"Could not stitch this area. Try a taller visible content area.");
-                }
+            int longH = 0;
+            HBITMAP shot = RunLongSession(selection, previousForeground, &longH);
+            if (shot) {
+                RunEditorModal(shot, RectWidth(selection), longH);
+                DeleteObject(shot);
+            } else {
+                NotifyAction(g_hiddenWindow, L"Long capture cancelled",
+                             L"No long screenshot was created.");
             }
         } else {
             HBITMAP shot = CropCapture(capture, selection);
@@ -1972,94 +2184,6 @@ static void RunSelectedCapture(CaptureKind initialKind) {
 
 static void RunCapture() {
     RunSelectedCapture(CaptureRegion);
-}
-
-static void SendWheelDownAt(POINT point, HWND target) {
-    HWND root = target ? GetAncestor(target, GA_ROOT) : NULL;
-    if (root) {
-        SetForegroundWindow(root);
-    }
-    SetCursorPos(point.x, point.y);
-    Sleep(80);
-
-    INPUT input = {};
-    input.type = INPUT_MOUSE;
-    input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-    input.mi.mouseData = static_cast<DWORD>(-WHEEL_DELTA * kLongCaptureWheelNotches);
-    SendInput(1, &input, sizeof(input));
-    Sleep(kLongCaptureScrollDelayMs);
-}
-
-static HBITMAP CaptureLongSelection(const RECT &selection, int desiredHeight, int *outH) {
-    int w = RectWidth(selection);
-    int h = RectHeight(selection);
-    if (w <= 16 || h <= 16) {
-        return NULL;
-    }
-    desiredHeight = Clamp(desiredHeight, h, kLongCaptureMaxHeight);
-
-    POINT center = {selection.left + w / 2, selection.top + h / 2};
-    HWND target = WindowFromPoint(center);
-    POINT oldCursor;
-    GetCursorPos(&oldCursor);
-
-    std::vector<LongFrame> frames;
-    std::vector<BYTE> prevPixels;
-    int totalH = 0;
-
-    HBITMAP first = CaptureScreenRect(selection);
-    if (!first || !ReadBitmapPixels(first, w, h, &prevPixels)) {
-        if (first) {
-            DeleteObject(first);
-        }
-        SetCursorPos(oldCursor.x, oldCursor.y);
-        return NULL;
-    }
-    frames.push_back({first, 0, h});
-    totalH = h;
-
-    for (int i = 1; i < kLongCaptureMaxFrames && totalH < desiredHeight; ++i) {
-        SendWheelDownAt(center, target);
-        HBITMAP next = CaptureScreenRect(selection);
-        std::vector<BYTE> nextPixels;
-        if (!next || !ReadBitmapPixels(next, w, h, &nextPixels)) {
-            if (next) {
-                DeleteObject(next);
-            }
-            break;
-        }
-
-        if (AverageFrameDiff(prevPixels, nextPixels, w, h) <= 8) {
-            DeleteObject(next);
-            break;
-        }
-
-        int overlap = EstimateOverlap(prevPixels, nextPixels, w, h);
-        int copyH = h - overlap;
-        if (copyH < 32) {
-            DeleteObject(next);
-            break;
-        }
-        if (totalH + copyH > desiredHeight) {
-            copyH = desiredHeight - totalH;
-        }
-        if (copyH <= 0) {
-            DeleteObject(next);
-            break;
-        }
-
-        frames.push_back({next, overlap, copyH});
-        totalH += copyH;
-        prevPixels.swap(nextPixels);
-    }
-
-    SetCursorPos(oldCursor.x, oldCursor.y);
-
-    HBITMAP stitched = StitchLongFrames(frames, w, outH);
-    for (LongFrame &frame : frames) {
-        DeleteObject(frame.bitmap);
-    }
-    return stitched;
 }
 
 static void RunLongCapture() {
@@ -2412,13 +2536,13 @@ static void RegisterWindowClasses() {
     overlay.lpszClassName = kOverlayClass;
     RegisterClassW(&overlay);
 
-    WNDCLASSW length = {};
-    length.lpfnWndProc = LengthProc;
-    length.hInstance = g_instance;
-    length.hCursor = LoadCursor(NULL, IDC_SIZENS);
-    length.hbrBackground = NULL;
-    length.lpszClassName = kLengthClass;
-    RegisterClassW(&length);
+    WNDCLASSW longSession = {};
+    longSession.lpfnWndProc = LongSessionProc;
+    longSession.hInstance = g_instance;
+    longSession.hCursor = LoadCursor(NULL, IDC_ARROW);
+    longSession.hbrBackground = NULL;
+    longSession.lpszClassName = kLongSessionClass;
+    RegisterClassW(&longSession);
 
     WNDCLASSW editor = {};
     editor.lpfnWndProc = EditorProc;
