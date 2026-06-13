@@ -424,7 +424,7 @@ namespace ModernScreenshot
             }
             if (modernToolbar.Right > this.Width)
             {
-                modernToolbar.Location = new Point(this.Width - modernToolbar.Width - 10, modernToolbar.Y);
+                modernToolbar.Location = new Point(this.Width - modernToolbar.Width - 10, modernToolbar.Location.Y);
             }
 
             int x = 15;
