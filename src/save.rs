@@ -3,10 +3,11 @@ use windows::{
     Win32::Foundation::*,
     Win32::Graphics::Gdi::*,
     Win32::UI::WindowsAndMessaging::*,
-    Win32::Storage::FileSystem::*,
     Win32::System::DataExchange::*,
-    Win32::System::IO::*,
 };
+
+// CF_BITMAP constant
+const CF_BITMAP: u32 = 2;
 
 pub unsafe fn save_bitmap_to_file(hdc: HDC, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
     // 简化版：保存到固定路径
@@ -89,21 +90,17 @@ unsafe fn save_bitmap_as_bmp(filename: &[u16], hbitmap: HBITMAP, width: i32, hei
     file_header[28..30].copy_from_slice(&24u16.to_le_bytes());
 
     // 写入文件
-    let h_file = CreateFileW(
-        PCWSTR(filename.as_ptr()),
-        FILE_GENERIC_WRITE.0,
-        FILE_SHARE_NONE,
-        None,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        None,
-    )?;
+    use std::fs::File;
+    use std::io::Write;
 
-    let mut written = 0u32;
-    WriteFile(h_file, Some(&file_header), Some(&mut written), None)?;
-    WriteFile(h_file, Some(&pixels), Some(&mut written), None)?;
+    let filename_str = filename.iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8 as char)
+        .collect::<String>();
 
-    CloseHandle(h_file)?;
+    let mut file = File::create(filename_str.trim_end_matches('\0'))?;
+    file.write_all(&file_header)?;
+    file.write_all(&pixels)?;
     ReleaseDC(None, hdc);
 
     Ok(())
@@ -123,7 +120,7 @@ pub unsafe fn copy_bitmap_to_clipboard(hwnd: HWND, hdc: HDC, x: i32, y: i32, wid
     BitBlt(mem_dc, 0, 0, width, height, hdc, x, y, SRCCOPY);
 
     // 设置到剪贴板
-    SetClipboardData(CF_BITMAP.0 as u32, HANDLE(hbitmap.0))?;
+    SetClipboardData(CF_BITMAP, HANDLE(hbitmap.0))?;
 
     CloseClipboard()?;
     DeleteDC(mem_dc);
