@@ -53,7 +53,6 @@ static const wchar_t *const kVersion = WIDEN(VERSION);
 static const wchar_t *const kHiddenClass = L"ModernScreenshotHidden";
 static const wchar_t *const kOverlayClass = L"ModernScreenshotOverlay";
 static const wchar_t *const kLongSessionClass = L"ModernScreenshotLongSession";
-static const wchar_t *const kLongPreviewClass = L"ModernScreenshotLongPreview";
 static const wchar_t *const kEditorClass = L"ModernScreenshotEditor";
 static const wchar_t *const kSettingsClass = L"ModernScreenshotSettings";
 static const wchar_t *const kTrayPopupClass = L"ModernScreenshotTrayPopup";
@@ -73,14 +72,12 @@ static constexpr int kEditorMargin = 80;
 
 static constexpr int kLongCaptureMaxFrames = 512;
 static constexpr int kLongCaptureMaxHeight = 80000;
-static constexpr int kLongScrollWaitMs = 180;
-static constexpr int kLongScrollSettleMs = 60;
-static constexpr int kLongScrollSettleAttempts = 4;
-static constexpr int kLongOverlapErrorLimit = 32;
-static constexpr int kLongHudW = 380;
-static constexpr int kLongHudH = 46;
-static constexpr int kLongPreviewW = 56;
-static constexpr int kLongPreviewH = 190;
+static constexpr int kLongScrollWaitMs = 240;
+static constexpr int kLongScrollSettleMs = 80;
+static constexpr int kLongScrollSettleAttempts = 5;
+static constexpr int kLongOverlapErrorLimit = 30;
+static constexpr int kLongSessionW = 360;
+static constexpr int kLongSessionH = 520;
 
 static constexpr int kSettingsApply = 3001;
 static constexpr int kSettingsCancel = 3002;
@@ -92,7 +89,6 @@ static constexpr int kOverlayModeH = 34;
 static constexpr int kOverlayModeGap = 8;
 static constexpr int kLongSessionDone = 4101;
 static constexpr int kLongSessionCancel = 4102;
-static constexpr int kLongSessionAutoToggle = 4103;
 
 static const wchar_t *const kSingleInstanceName = L"Local\\ModernScreenshot.SingleInstance";
 static const wchar_t *const kWakeupMessageName = L"ModernScreenshotWakeup";

@@ -1,34 +1,17 @@
 #include "long_capture.h"
-#include <atomic>
 #include <cmath>
+#include <cstring>
+#include <algorithm>
 
 namespace ModernScreenshot {
-
-static HHOOK g_mouseHook = NULL;
-static std::atomic<bool> g_manualWheelTriggered{false};
-static RECT g_hookSelection = {0, 0, 0, 0};
-
-static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode == HC_ACTION && wParam == WM_MOUSEWHEEL) {
-        MSLLHOOKSTRUCT *hookStruct = reinterpret_cast<MSLLHOOKSTRUCT *>(lParam);
-        if (hookStruct) {
-            POINT pt = hookStruct->pt;
-            if (pt.x >= g_hookSelection.left && pt.x <= g_hookSelection.right &&
-                pt.y >= g_hookSelection.top && pt.y <= g_hookSelection.bottom) {
-                g_manualWheelTriggered.store(true);
-            }
-        }
-    }
-    return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
-}
 
 static bool IsOwnWindow(HWND hwnd) {
     while (hwnd) {
         wchar_t className[96] = {};
         GetClassNameW(hwnd, className, 96);
         if (wcscmp(className, kHiddenClass) == 0 || wcscmp(className, kOverlayClass) == 0 ||
-            wcscmp(className, kLongSessionClass) == 0 || wcscmp(className, kLongPreviewClass) == 0 ||
-            wcscmp(className, kEditorClass) == 0 || wcscmp(className, kSettingsClass) == 0) {
+            wcscmp(className, kLongSessionClass) == 0 || wcscmp(className, kEditorClass) == 0 ||
+            wcscmp(className, kSettingsClass) == 0) {
             return true;
         }
         hwnd = GetParent(hwnd);
@@ -88,6 +71,16 @@ static void PumpMessagesFor(HWND hwnd, int milliseconds) {
     } while (GetTickCount() < end && IsWindow(hwnd));
 }
 
+static void ClearPendingLongFrame(LongSessionState *state) {
+    if (!state) return;
+    if (state->pendingBitmap) {
+        DeleteObject(state->pendingBitmap);
+        state->pendingBitmap = NULL;
+    }
+    state->pendingPixels.clear();
+    state->pendingStableFrames = 0;
+}
+
 static bool AppendLongFrameStrip(LongSessionState *state, HBITMAP bitmap, int overlap) {
     if (!state || !bitmap) return false;
     if (state->totalH >= kLongCaptureMaxHeight ||
@@ -144,102 +137,94 @@ static bool IsSameFramePixels(const std::vector<BYTE> &a, const std::vector<BYTE
            (a.empty() || std::memcmp(a.data(), b.data(), a.size()) == 0);
 }
 
-// Robust Industrial-Grade Multi-Template Seam Matching Algorithm
-// Excludes moving scrollbars on the right margin & sticky headers on top
-static int MatchTemplateStrip(const std::vector<BYTE> &prev, const std::vector<BYTE> &curr,
-                              int w, int h, int templateY, int templateH, int scanStartX, int scanW,
-                              int searchMinY, int searchMaxY, int *outError) {
-    int xStep = std::max(1, scanW / 64);
-    int bestY = -1;
+static int OverlapError(const std::vector<BYTE> &prev, const std::vector<BYTE> &next, int w, int h, int overlap) {
+    // Exclude rightmost margin to ignore scrolling scrollbars
+    int marginR = std::min(18, w / 10);
+    int activeW = std::max(1, w - marginR);
+
+    int xStep = std::max(1, activeW / 56);
+    int yStep = std::max(1, overlap / 56);
+    long long diff = 0;
+    int samples = 0;
+    for (int y = 0; y < overlap; y += yStep) {
+        int prevY = h - overlap + y;
+        for (int x = 0; x < activeW; x += xStep) {
+            diff += PixelAbsDiff(PixelAt(prev, w, x, prevY), PixelAt(next, w, x, y));
+            ++samples;
+        }
+    }
+    return samples > 0 ? static_cast<int>(diff / samples) : 255;
+}
+
+static int EstimateOverlap(const std::vector<BYTE> &prev, const std::vector<BYTE> &next, int w, int h, int *outError) {
+    if (w <= 0 || h <= 1) {
+        if (outError) *outError = 255 * 3;
+        return 0;
+    }
+
+    int minOverlap = std::min(h - 1, std::max(48, h / 6));
+    int maxOverlap = h - 1;
+    int step = std::max(1, h / 120);
+    int bestOverlap = minOverlap;
     int bestError = 255 * 3;
 
-    for (int candY = searchMinY; candY <= searchMaxY; ++candY) {
-        long long diffSum = 0;
-        int samples = 0;
-
-        for (int row = 0; row < templateH; row += 2) {
-            int prevRowY = templateY + row;
-            int currRowY = candY + row;
-            for (int col = scanStartX; col < scanStartX + scanW; col += xStep) {
-                unsigned int p1 = PixelAt(prev, w, col, prevRowY);
-                unsigned int p2 = PixelAt(curr, w, col, currRowY);
-                diffSum += PixelAbsDiff(p1, p2);
-                ++samples;
-            }
+    // Coarse pass across valid overlap range
+    for (int overlap = minOverlap; overlap <= maxOverlap; overlap += step) {
+        int error = OverlapError(prev, next, w, h, overlap);
+        if (error < bestError) {
+            bestError = error;
+            bestOverlap = overlap;
         }
+    }
 
-        if (samples > 0) {
-            int avgDiff = static_cast<int>(diffSum / samples);
-            if (avgDiff < bestError) {
-                bestError = avgDiff;
-                bestY = candY;
-                if (bestError <= 4) break; // Early exit on perfect match
-            }
+    // Refinement pass around best candidate
+    int refineStart = std::max(minOverlap, bestOverlap - step);
+    int refineEnd = std::min(maxOverlap, bestOverlap + step);
+    for (int overlap = refineStart; overlap <= refineEnd; ++overlap) {
+        int error = OverlapError(prev, next, w, h, overlap);
+        if (error < bestError) {
+            bestError = error;
+            bestOverlap = overlap;
+        }
+    }
+
+    // Tail pass near bottom
+    int tailStart = std::max(minOverlap, h - std::max(96, h / 6));
+    for (int overlap = tailStart; overlap <= maxOverlap; ++overlap) {
+        int error = OverlapError(prev, next, w, h, overlap);
+        if (error < bestError) {
+            bestError = error;
+            bestOverlap = overlap;
         }
     }
 
     if (outError) *outError = bestError;
-    return bestY;
+    return bestError <= kLongOverlapErrorLimit ? bestOverlap : 0;
 }
 
-static int EstimateScrollShiftRobust(const std::vector<BYTE> &prev, const std::vector<BYTE> &curr,
-                                    int w, int h, int *outError) {
-    if (w <= 16 || h <= 32) {
-        if (outError) *outError = 255 * 3;
-        return 0;
+static bool AppendPendingLongTail(LongSessionState *state) {
+    if (!state || !state->pendingBitmap || state->pendingPixels.empty()) {
+        return false;
+    }
+    int overlapError = 255 * 3;
+    int overlap = EstimateOverlap(state->prevPixels, state->pendingPixels, state->w, state->h, &overlapError);
+    if (overlap <= 0 || overlap >= state->h) {
+        return false;
     }
 
-    // Exclude scrollbar margin on right and window edge on left
-    int marginR = std::min(24, w / 6);
-    int marginL = 4;
-    int scanW = w - marginL - marginR;
-    if (scanW <= 16) {
-        marginL = 0;
-        marginR = 0;
-        scanW = w;
+    HBITMAP bitmap = state->pendingBitmap;
+    state->pendingBitmap = NULL;
+    bool appended = AppendLongFrameStrip(state, bitmap, overlap);
+    DeleteObject(bitmap);
+    if (!appended) {
+        state->pendingPixels.clear();
+        state->pendingStableFrames = 0;
+        return false;
     }
-
-    const int TH = 32;
-    // Primary template placed near bottom of previous frame (above status bars)
-    int y1_ref = h - TH - 16;
-    if (y1_ref < 0) y1_ref = 0;
-
-    int maxSearchY = y1_ref - 2;
-    if (maxSearchY < 0) {
-        if (outError) *outError = 255 * 3;
-        return 0;
-    }
-
-    int t1Error = 255 * 3;
-    int y1_best = MatchTemplateStrip(prev, curr, w, h, y1_ref, TH, marginL, scanW,
-                                     0, maxSearchY, &t1Error);
-
-    if (y1_best < 0 || t1Error > kLongOverlapErrorLimit) {
-        if (outError) *outError = t1Error;
-        return 0;
-    }
-
-    int shift = y1_ref - y1_best;
-
-    // Cross-verify with secondary template from upper area to eliminate false positives
-    int y2_ref = y1_ref - 48;
-    if (y2_ref >= 0) {
-        int y2_expected = y2_ref - shift;
-        if (y2_expected >= 0) {
-            int t2Error = 255 * 3;
-            MatchTemplateStrip(prev, curr, w, h, y2_ref, TH, marginL, scanW,
-                               std::max(0, y2_expected - 2), std::min(h - TH, y2_expected + 2),
-                               &t2Error);
-            if (t2Error > kLongOverlapErrorLimit + 12) {
-                // Secondary template verification failed (likely a repeating pattern)
-                if (outError) *outError = t2Error;
-                return 0;
-            }
-        }
-    }
-
-    if (outError) *outError = t1Error;
-    return shift;
+    state->prevPixels.swap(state->pendingPixels);
+    state->pendingPixels.clear();
+    state->pendingStableFrames = 0;
+    return true;
 }
 
 static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BYTE> *pixels) {
@@ -252,6 +237,7 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
         state->totalH = state->h;
         state->lastCopyH = state->h;
         state->hasPrev = true;
+        ClearPendingLongFrame(state);
         return true;
     }
 
@@ -261,24 +247,35 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
         return false;
     }
 
-    int matchError = 255 * 3;
-    int shift = EstimateScrollShiftRobust(state->prevPixels, *pixels, state->w, state->h, &matchError);
-    if (shift <= 0) {
+    int overlapError = 255 * 3;
+    int overlap = EstimateOverlap(state->prevPixels, *pixels, state->w, state->h, &overlapError);
+    if (overlap <= 0) {
         if (AverageFrameDiff(state->prevPixels, *pixels, state->w, state->h) <= 1) {
             state->lastSampleUnchanged = true;
+        } else if (state->pendingBitmap && AverageFrameDiff(state->pendingPixels, *pixels, state->w, state->h) <= 2) {
+            ++state->pendingStableFrames;
+            DeleteObject(state->pendingBitmap);
+            state->pendingBitmap = bitmap;
+            state->pendingPixels.swap(*pixels);
+            return false;
         } else {
+            ClearPendingLongFrame(state);
+            state->pendingBitmap = bitmap;
+            state->pendingPixels.swap(*pixels);
+            state->pendingStableFrames = 1;
             ++state->skippedFrames;
+            return false;
         }
+        ++state->skippedFrames;
         DeleteObject(bitmap);
         return false;
     }
 
-    int overlap = state->h - shift;
     bool appended = AppendLongFrameStrip(state, bitmap, overlap);
     DeleteObject(bitmap);
     if (!appended) return false;
-
     state->prevPixels.swap(*pixels);
+    ClearPendingLongFrame(state);
     return true;
 }
 
@@ -367,207 +364,89 @@ static HBITMAP StitchLongFrames(const std::vector<LongFrame> &frames, int w, int
     return output;
 }
 
-// HUD Button Geometry
-static RECT LongHudAutoToggleRect() {
-    return {144, 6, 234, 40};
-}
-
-static RECT LongHudDoneRect() {
-    return {240, 6, 320, 40};
-}
-
-static RECT LongHudCancelRect() {
-    return {326, 6, 372, 40};
-}
-
-static LongHudHit HitTestLongHud(int x, int y) {
-    if (PointInRect(x, y, LongHudAutoToggleRect())) return LongHitAutoToggle;
-    if (PointInRect(x, y, LongHudDoneRect())) return LongHitDone;
-    if (PointInRect(x, y, LongHudCancelRect())) return LongHitCancel;
-    return LongHitNone;
-}
-
-static void CalculateLongHudPosition(const RECT &selection, int *outX, int *outY) {
+static bool CandidateLongPanelPosition(const RECT &selection, int x, int y, int *outX, int *outY) {
     int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    x = Clamp(x, vx + 8, vx + vw - kLongSessionW - 8);
+    y = Clamp(y, vy + 8, vy + vh - kLongSessionH - 8);
 
-    int w = RectWidth(selection);
-    int x = selection.left + (w - kLongHudW) / 2;
-    x = Clamp(x, vx + 10, vx + vw - kLongHudW - 10);
-
-    int y = selection.bottom + 12;
-    if (y + kLongHudH > vy + vh - 12) {
-        y = selection.top - kLongHudH - 12;
-    }
-    y = Clamp(y, vy + 10, vy + vh - kLongHudH - 10);
-
+    RECT panel = {x, y, x + kLongSessionW, y + kLongSessionH};
+    if (RectIntersects(panel, selection)) return false;
     *outX = x;
     *outY = y;
+    return true;
 }
 
-static void CalculateLongPreviewPosition(const RECT &selection, int *outX, int *outY) {
+static void LongPanelPosition(const RECT &selection, int *outX, int *outY) {
+    const int gap = 16;
+    int candidates[][2] = {
+        {selection.right + gap, selection.top},
+        {selection.left - kLongSessionW - gap, selection.top},
+        {selection.right + gap, selection.bottom - kLongSessionH},
+        {selection.left - kLongSessionW - gap, selection.bottom - kLongSessionH},
+        {selection.left, selection.bottom + gap},
+        {selection.left, selection.top - kLongSessionH - gap},
+    };
+
+    for (const auto &candidate : candidates) {
+        if (CandidateLongPanelPosition(selection, candidate[0], candidate[1], outX, outY)) {
+            return;
+        }
+    }
+
     int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-    int x = selection.right + 12;
-    if (x + kLongPreviewW > vx + vw - 8) {
-        x = selection.left - kLongPreviewW - 12;
-    }
-    x = Clamp(x, vx + 8, vx + vw - kLongPreviewW - 8);
-
-    int y = Clamp(selection.top, vy + 8, vy + vh - kLongPreviewH - 8);
-
-    *outX = x;
-    *outY = y;
+    *outX = Clamp(selection.right + gap, vx + 8, vx + vw - kLongSessionW - 8);
+    *outY = Clamp(selection.top, vy + 8, vy + vh - kLongSessionH - 8);
 }
 
-static void DrawLongHud(HWND hwnd, LongSessionState *state, HDC dc) {
-    RECT rect;
-    GetClientRect(hwnd, &rect);
-    FillRectColor(dc, rect, RGB(13, 15, 18));
-
-    if (StartGdiplus()) {
-        Graphics graphics(dc);
-        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
-
-        // Obsidian Glass Capsule
-        GraphicsPath path;
-        BuildRoundedRectPath(&path, 0.0f, 0.0f, static_cast<float>(RectWidth(rect)),
-                             static_cast<float>(RectHeight(rect)), 12.0f);
-        SolidBrush bg(Color(245, 13, 15, 18));
-        Pen border(Color(220, 99, 102, 241), 1.2f);
-        graphics.FillPath(&bg, &path);
-        graphics.DrawPath(&border, &path);
-
-        // Status indicator dot
-        Color dotColor = state->autoScroll ? Color(255, 16, 185, 129) : Color(255, 56, 189, 248);
-        SolidBrush dotBrush(dotColor);
-        graphics.FillEllipse(&dotBrush, 14.0f, 18.0f, 9.0f, 9.0f);
-
-        // Live height & frames text
-        wchar_t status[64];
-        wsprintfW(status, L"%d px (%d f)", state->totalH, static_cast<int>(state->frames.size()));
-        Font font(L"Segoe UI", 13.0f, FontStyleBold, UnitPixel);
-        SolidBrush textBrush(Color(255, 248, 250, 252));
-        graphics.DrawString(status, -1, &font, PointF(28.0f, 14.0f), &textBrush);
-
-        // Auto Scroll Toggle Button
-        RECT autoRect = LongHudAutoToggleRect();
-        bool autoHover = state->hover == LongHitAutoToggle;
-        GraphicsPath autoPath;
-        BuildRoundedRectPath(&autoPath, static_cast<float>(autoRect.left), static_cast<float>(autoRect.top),
-                             static_cast<float>(RectWidth(autoRect)), static_cast<float>(RectHeight(autoRect)), 7.0f);
-        SolidBrush autoFill(state->autoScroll ? (autoHover ? Color(255, 45, 52, 74) : Color(255, 34, 40, 58))
-                                             : (autoHover ? Color(255, 38, 44, 60) : Color(255, 24, 28, 40)));
-        Pen autoBorder(state->autoScroll ? Color(255, 129, 140, 248) : Color(255, 58, 66, 86), 1.0f);
-        graphics.FillPath(&autoFill, &autoPath);
-        graphics.DrawPath(&autoBorder, &autoPath);
-
-        const wchar_t *autoLabel = state->autoScroll ? L"⏸ Pause" : L"▶ Auto";
-        Font autoFont(L"Segoe UI", 11.0f, FontStyleRegular, UnitPixel);
-        SolidBrush autoTextBrush(Color(255, 226, 232, 240));
-        Gdiplus::StringFormat fmt;
-        fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
-        fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-        RectF aTarget(static_cast<float>(autoRect.left), static_cast<float>(autoRect.top),
-                      static_cast<float>(RectWidth(autoRect)), static_cast<float>(RectHeight(autoRect)));
-        graphics.DrawString(autoLabel, -1, &autoFont, aTarget, &fmt, &autoTextBrush);
-
-        // Finish / Done Button (Electric Indigo)
-        RECT doneRect = LongHudDoneRect();
-        bool doneHover = state->hover == LongHitDone;
-        GraphicsPath donePath;
-        BuildRoundedRectPath(&donePath, static_cast<float>(doneRect.left), static_cast<float>(doneRect.top),
-                             static_cast<float>(RectWidth(doneRect)), static_cast<float>(RectHeight(doneRect)), 7.0f);
-        SolidBrush doneFill(doneHover ? Color(255, 129, 140, 248) : Color(255, 99, 102, 241));
-        graphics.FillPath(&doneFill, &donePath);
-
-        Font doneFont(L"Segoe UI", 12.0f, FontStyleBold, UnitPixel);
-        SolidBrush doneText(Color(255, 255, 255, 255));
-        RectF dTarget(static_cast<float>(doneRect.left), static_cast<float>(doneRect.top),
-                      static_cast<float>(RectWidth(doneRect)), static_cast<float>(RectHeight(doneRect)));
-        graphics.DrawString(L"✓ Finish", -1, &doneFont, dTarget, &fmt, &doneText);
-
-        // Cancel Button
-        RECT cancelRect = LongHudCancelRect();
-        bool cancelHover = state->hover == LongHitCancel;
-        GraphicsPath cancelPath;
-        BuildRoundedRectPath(&cancelPath, static_cast<float>(cancelRect.left), static_cast<float>(cancelRect.top),
-                             static_cast<float>(RectWidth(cancelRect)), static_cast<float>(RectHeight(cancelRect)), 7.0f);
-        SolidBrush cancelFill(cancelHover ? Color(255, 45, 52, 68) : Color(255, 26, 30, 42));
-        Pen cancelBorder(Color(255, 58, 66, 86), 1.0f);
-        graphics.FillPath(&cancelFill, &cancelPath);
-        graphics.DrawPath(&cancelBorder, &cancelPath);
-
-        Font cancelFont(L"Segoe UI", 12.0f, FontStyleRegular, UnitPixel);
-        SolidBrush cancelText(Color(255, 148, 163, 184));
-        RectF cTarget(static_cast<float>(cancelRect.left), static_cast<float>(cancelRect.top),
-                      static_cast<float>(RectWidth(cancelRect)), static_cast<float>(RectHeight(cancelRect)));
-        graphics.DrawString(L"✕", -1, &cancelFont, cTarget, &fmt, &cancelText);
-    } else {
-        FillRectColor(dc, LongHudDoneRect(), RGB(99, 102, 241));
-        DrawCenteredText(dc, L"Finish", LongHudDoneRect(), -12, FW_BOLD, RGB(255, 255, 255));
-    }
+static RECT LongDoneRect() {
+    return {176, 470, 256, 504};
 }
 
-static void DrawLongPreviewWindow(HWND hwnd, LongSessionState *state, HDC dc) {
-    RECT rect;
-    GetClientRect(hwnd, &rect);
-    FillRectColor(dc, rect, RGB(13, 15, 18));
+static RECT LongCancelRect() {
+    return {266, 470, 346, 504};
+}
 
-    if (StartGdiplus()) {
-        Graphics graphics(dc);
-        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
-
-        GraphicsPath path;
-        BuildRoundedRectPath(&path, 0.0f, 0.0f, static_cast<float>(RectWidth(rect)),
-                             static_cast<float>(RectHeight(rect)), 8.0f);
-        SolidBrush bg(Color(240, 13, 15, 18));
-        Pen border(Color(180, 48, 56, 76), 1.0f);
-        graphics.FillPath(&bg, &path);
-        graphics.DrawPath(&border, &path);
-
-        Font titleFont(L"Segoe UI", 9.0f, FontStyleBold, UnitPixel);
-        SolidBrush titleBrush(Color(255, 148, 163, 184));
-        graphics.DrawString(L"PREVIEW", -1, &titleFont, PointF(8.0f, 6.0f), &titleBrush);
-    }
-
+static void DrawLongPreview(LongSessionState *state, HDC dc, const RECT &preview) {
+    FillRectColor(dc, preview, RGB(8, 10, 14));
     if (!state || state->frames.empty() || state->w <= 0 || state->totalH <= 0) {
+        DrawCenteredText(dc, L"Preview will appear after first frame", preview, -12, FW_MEDIUM, RGB(100, 116, 139));
         return;
     }
 
-    int previewTop = 22;
-    int previewW = RectWidth(rect) - 12;
-    int previewH = RectHeight(rect) - previewTop - 8;
-    if (previewW <= 0 || previewH <= 0) return;
+    int padding = 8;
+    RECT content = {preview.left + padding, preview.top + padding, preview.right - padding, preview.bottom - padding};
+    int contentW = RectWidth(content);
+    int contentH = RectHeight(content);
+    if (contentW <= 0 || contentH <= 0) return;
 
-    int drawX = 6;
-    int totalScaledH = std::max(1, state->totalH * previewW / state->w);
-    int visibleTop = std::max(0, totalScaledH - previewH);
+    int drawW = contentW;
+    int totalScaledH = std::max(1, state->totalH * drawW / state->w);
+    int visibleTop = std::max(0, totalScaledH - contentH);
+    int drawX = content.left;
 
     HDC source = CreateCompatibleDC(dc);
     if (!source) return;
 
     int scaledY = 0;
     for (const LongFrame &frame : state->frames) {
-        int frameScaledH = std::max(1, frame.copyH * previewW / state->w);
-        int destTop = previewTop + scaledY - visibleTop;
+        int frameScaledH = std::max(1, frame.copyH * drawW / state->w);
+        int destTop = content.top + scaledY - visibleTop;
         int destBottom = destTop + frameScaledH;
-        if (destBottom > previewTop && destTop < previewTop + previewH) {
-            int clippedTop = std::max(destTop, previewTop);
-            int clippedBottom = std::min(destBottom, previewTop + previewH);
+        if (destBottom > content.top && destTop < content.bottom) {
+            int clippedTop = std::max(destTop, static_cast<int>(content.top));
+            int clippedBottom = std::min(destBottom, static_cast<int>(content.bottom));
             int clippedH = clippedBottom - clippedTop;
             int srcY = std::max(0, (clippedTop - destTop) * frame.copyH / frameScaledH);
             int srcH = std::max(1, clippedH * frame.copyH / frameScaledH);
             HGDIOBJ oldSource = SelectObject(source, frame.bitmap);
             SetStretchBltMode(dc, HALFTONE);
-            StretchBlt(dc, drawX, clippedTop, previewW, clippedH,
+            StretchBlt(dc, drawX, clippedTop, drawW, clippedH,
                        source, 0, srcY, state->w, srcH, SRCCOPY);
             SelectObject(source, oldSource);
         }
@@ -578,40 +457,101 @@ static void DrawLongPreviewWindow(HWND hwnd, LongSessionState *state, HDC dc) {
 
     if (StartGdiplus()) {
         Graphics graphics(dc);
-        // Latest seam line indicator
-        Pen seamPen(Color(255, 99, 102, 241), 1.5f);
-        int indicatorY = previewTop + std::min(previewH - 1, totalScaledH);
-        graphics.DrawLine(&seamPen, drawX, indicatorY, drawX + previewW, indicatorY);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        Pen border(Color(180, 40, 46, 60), 1.0f);
+        graphics.DrawRectangle(&border, preview.left, preview.top, RectWidth(preview) - 1, RectHeight(preview) - 1);
+        SolidBrush fade(Color(220, 13, 15, 20));
+        graphics.FillRectangle(&fade, preview.left + 1, preview.top + 1, RectWidth(preview) - 2, 26);
     }
+
+    wchar_t label[96];
+    wsprintfW(label, L"Live preview  •  %d × %d", state->w, state->totalH);
+    DrawTextLabel(dc, label, preview.left + 12, preview.top + 7, RGB(248, 250, 252));
 }
 
-LRESULT CALLBACK LongPreviewProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    LongSessionState *state = reinterpret_cast<LongSessionState *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
+    RECT rect;
+    GetClientRect(hwnd, &rect);
+    FillRectColor(dc, rect, RGB(13, 15, 18));
 
-    switch (message) {
-    case WM_CREATE: {
-        CREATESTRUCTW *create = reinterpret_cast<CREATESTRUCTW *>(lParam);
-        state = reinterpret_cast<LongSessionState *>(create->lpCreateParams);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-        return 0;
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        SolidBrush panel(Color(250, 13, 15, 18));
+        graphics.FillRectangle(&panel, 0, 0, RectWidth(rect), RectHeight(rect));
+        Pen border(Color(220, 99, 102, 241), 1.2f);
+        graphics.DrawRectangle(&border, 0, 0, RectWidth(rect) - 1, RectHeight(rect) - 1);
     }
-    case WM_ERASEBKGND:
-        return 1;
-    case WM_MOUSEACTIVATE:
-        return MA_NOACTIVATE;
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(hwnd, &ps);
-        if (state) {
-            DrawLongPreviewWindow(hwnd, state, dc);
-        }
-        EndPaint(hwnd, &ps);
-        return 0;
+
+    wchar_t status[128];
+    wsprintfW(status, L"Long capture  •  %d frames  •  %d px", static_cast<int>(state->frames.size()), state->totalH);
+    DrawTextLabel(dc, status, 14, 12, RGB(248, 250, 252));
+
+    if (!state->started) {
+        DrawTextLabel(dc, L"Preparing automatic scroll capture...", 14, 34, RGB(148, 163, 184));
+    } else if (state->captureLimitReached) {
+        DrawTextLabel(dc, L"Finished or limit reached. Opening editor.", 14, 34, RGB(245, 158, 11));
+    } else if (state->skippedFrames > 0) {
+        DrawTextLabel(dc, L"Waiting for stable overlap...", 14, 34, RGB(245, 158, 11));
+    } else if (!state->statusText.empty()) {
+        DrawTextLabel(dc, state->statusText, 14, 34, RGB(148, 163, 184));
+    } else {
+        wchar_t hint[128];
+        wsprintfW(hint, L"Auto scrolling. Last +%d px", state->lastCopyH);
+        DrawTextLabel(dc, hint, 14, 34, RGB(148, 163, 184));
     }
-    case WM_DESTROY:
-        return 0;
+
+    RECT preview = {14, 62, 346, 458};
+    DrawLongPreview(state, dc, preview);
+
+    RECT done = LongDoneRect();
+    RECT cancel = LongCancelRect();
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        GraphicsPath donePath;
+        BuildRoundedRectPath(&donePath, static_cast<float>(done.left), static_cast<float>(done.top),
+                             static_cast<float>(RectWidth(done)), static_cast<float>(RectHeight(done)), 8.0f);
+        SolidBrush doneFill(Color(255, 99, 102, 241));
+        graphics.FillPath(&doneFill, &donePath);
+
+        GraphicsPath cancelPath;
+        BuildRoundedRectPath(&cancelPath, static_cast<float>(cancel.left), static_cast<float>(cancel.top),
+                             static_cast<float>(RectWidth(cancel)), static_cast<float>(RectHeight(cancel)), 8.0f);
+        SolidBrush cancelFill(Color(255, 30, 35, 48));
+        Pen cancelBorder(Color(180, 56, 64, 82), 1.0f);
+        graphics.FillPath(&cancelFill, &cancelPath);
+        graphics.DrawPath(&cancelBorder, &cancelPath);
+    } else {
+        FillRectColor(dc, done, RGB(99, 102, 241));
+        FillRectColor(dc, cancel, RGB(30, 35, 48));
     }
-    return DefWindowProcW(hwnd, message, wParam, lParam);
+    DrawCenteredText(dc, L"Stop", done, -14, FW_SEMIBOLD, RGB(255, 255, 255));
+    DrawCenteredText(dc, L"Cancel", cancel, -14, FW_SEMIBOLD, RGB(226, 232, 240));
+}
+
+static void PaintLongSessionBuffered(HWND hwnd, LongSessionState *state, HDC dc, const RECT &paint) {
+    int w = RectWidth(paint);
+    int h = RectHeight(paint);
+    if (!state || w <= 0 || h <= 0) return;
+
+    HDC memory = CreateCompatibleDC(dc);
+    HBITMAP buffer = CreateCompatibleBitmap(dc, w, h);
+    if (!memory || !buffer) {
+        if (buffer) DeleteObject(buffer);
+        if (memory) DeleteDC(memory);
+        DrawLongSession(hwnd, state, dc);
+        return;
+    }
+
+    HGDIOBJ old = SelectObject(memory, buffer);
+    SetViewportOrgEx(memory, -paint.left, -paint.top, NULL);
+    DrawLongSession(hwnd, state, memory);
+    SetViewportOrgEx(memory, 0, 0, NULL);
+    BitBlt(dc, paint.left, paint.top, w, h, memory, 0, 0, SRCCOPY);
+    SelectObject(memory, old);
+    DeleteObject(buffer);
+    DeleteDC(memory);
 }
 
 LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -628,35 +568,29 @@ LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         return 1;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
-    case WM_MOUSEMOVE: {
-        if (state) {
-            int x = GET_X_LPARAM(lParam);
-            int y = GET_Y_LPARAM(lParam);
-            LongHudHit hit = HitTestLongHud(x, y);
-            if (hit != state->hover) {
-                state->hover = hit;
-                InvalidateRect(hwnd, NULL, FALSE);
-            }
-            TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
-            TrackMouseEvent(&tme);
-        }
-        return 0;
-    }
-    case WM_MOUSELEAVE: {
-        if (state && state->hover != LongHitNone) {
-            state->hover = LongHitNone;
-            InvalidateRect(hwnd, NULL, FALSE);
-        }
-        return 0;
-    }
-    case WM_KEYDOWN:
-        if ((wParam == VK_RETURN || wParam == VK_SPACE) && state) {
+    case WM_COMMAND:
+        if (LOWORD(wParam) == kLongSessionDone && state) {
             state->done = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wParam) == kLongSessionCancel && state) {
+            state->cancelled = true;
+            state->done = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN && state) {
+            state->done = true;
+            DestroyWindow(hwnd);
             return 0;
         }
         if (wParam == VK_ESCAPE && state) {
             state->cancelled = true;
             state->done = true;
+            DestroyWindow(hwnd);
             return 0;
         }
         break;
@@ -664,15 +598,15 @@ LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         if (state) {
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
-            LongHudHit hit = HitTestLongHud(x, y);
-            if (hit == LongHitAutoToggle) {
-                state->autoScroll = !state->autoScroll;
-                InvalidateRect(hwnd, NULL, FALSE);
-            } else if (hit == LongHitDone) {
+            RECT done = LongDoneRect();
+            RECT cancel = LongCancelRect();
+            if (PointInRect(x, y, done)) {
                 state->done = true;
-            } else if (hit == LongHitCancel) {
+                DestroyWindow(hwnd);
+            } else if (PointInRect(x, y, cancel)) {
                 state->cancelled = true;
                 state->done = true;
+                DestroyWindow(hwnd);
             } else {
                 SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
             }
@@ -682,11 +616,15 @@ LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
         if (state) {
-            DrawLongHud(hwnd, state, dc);
+            PaintLongSessionBuffered(hwnd, state, dc, ps.rcPaint);
         }
         EndPaint(hwnd, &ps);
         return 0;
     }
+    case WM_CLOSE:
+        if (state) state->done = true;
+        DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY:
         return 0;
     }
@@ -700,8 +638,6 @@ HBITMAP RunLongSession(HINSTANCE instance, const RECT &selection, HWND preferred
     state.w = RectWidth(selection);
     state.h = RectHeight(selection);
     state.totalH = 0;
-    state.autoScroll = true;
-
     POINT center = {selection.left + state.w / 2, selection.top + state.h / 2};
     state.target = WindowAtPointForScroll(center, preferredTarget);
     state.targetRoot = RootWindow(state.target);
@@ -717,124 +653,110 @@ HBITMAP RunLongSession(HINSTANCE instance, const RECT &selection, HWND preferred
     FocusLongTarget(&state);
     SetCursorPos(center.x, center.y);
 
-    int hudX = 0, hudY = 0;
-    CalculateLongHudPosition(selection, &hudX, &hudY);
+    int x = 0;
+    int y = 0;
+    LongPanelPosition(selection, &x, &y);
 
-    HWND hudWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                                 kLongSessionClass, L"ModernScreenshot Long HUD",
-                                 WS_POPUP, hudX, hudY, kLongHudW, kLongHudH, NULL, NULL, instance, &state);
-    if (!hudWnd) {
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                                kLongSessionClass, L"ModernScreenshot Long Capture",
+                                WS_POPUP, x, y, kLongSessionW, kLongSessionH, NULL, NULL, instance, &state);
+    if (!hwnd) {
         for (LongFrame &frame : state.frames) DeleteObject(frame.bitmap);
+        ClearPendingLongFrame(&state);
         return NULL;
     }
-    state.hudWnd = hudWnd;
 
-    int prevX = 0, prevY = 0;
-    CalculateLongPreviewPosition(selection, &prevX, &prevY);
-
-    HWND previewWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                                     kLongPreviewClass, L"ModernScreenshot Long Preview",
-                                     WS_POPUP, prevX, prevY, kLongPreviewW, kLongPreviewH, NULL, NULL, instance, &state);
-    state.previewWnd = previewWnd;
-
-    ShowWindow(hudWnd, SW_SHOWNOACTIVATE);
-    UpdateWindow(hudWnd);
-
-    if (previewWnd) {
-        ShowWindow(previewWnd, SW_SHOWNOACTIVATE);
-        UpdateWindow(previewWnd);
-    }
-
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    UpdateWindow(hwnd);
     FocusLongTarget(&state);
     SetCursorPos(center.x, center.y);
 
-    // Setup mouse hook for manual wheel scrolling
-    g_hookSelection = selection;
-    g_manualWheelTriggered.store(false);
-    g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, instance, 0);
-
     state.started = true;
     state.statusText = L"Auto scrolling...";
-    InvalidateRect(hudWnd, NULL, FALSE);
-    PumpMessagesFor(hudWnd, 120);
+    InvalidateRect(hwnd, NULL, FALSE);
+    PumpMessagesFor(hwnd, 120);
 
-    DWORD lastAutoScrollTick = GetTickCount();
-
-    while (!state.done && !state.cancelled && IsWindow(hudWnd)) {
+    while (!state.done && !state.cancelled && IsWindow(hwnd)) {
         if (state.totalH >= kLongCaptureMaxHeight ||
             static_cast<int>(state.frames.size()) >= kLongCaptureMaxFrames) {
             state.captureLimitReached = true;
+            state.statusText = L"Limit reached.";
+            InvalidateRect(hwnd, NULL, FALSE);
             break;
         }
 
-        bool shouldScroll = false;
-        bool isManual = false;
-
-        // Check if user manually scrolled mouse wheel
-        if (g_manualWheelTriggered.exchange(false)) {
-            shouldScroll = true;
-            isManual = true;
-            PumpMessagesFor(hudWnd, kLongScrollSettleMs);
-        } else if (state.autoScroll) {
-            DWORD now = GetTickCount();
-            if (now - lastAutoScrollTick >= static_cast<DWORD>(kLongScrollWaitMs)) {
-                lastAutoScrollTick = now;
-                if (!SendLongScrollStep(&state)) {
-                    break;
-                }
-                shouldScroll = true;
-                PumpMessagesFor(hudWnd, kLongScrollSettleMs);
-            }
+        if (!SendLongScrollStep(&state)) {
+            state.statusText = L"Target did not accept scrolling.";
+            InvalidateRect(hwnd, NULL, FALSE);
+            PumpMessagesFor(hwnd, 400);
+            break;
         }
 
-        PumpMessagesFor(hudWnd, 20);
-        if (state.done || state.cancelled || !IsWindow(hudWnd)) break;
+        PumpMessagesFor(hwnd, kLongScrollWaitMs);
+        if (state.done || state.cancelled || !IsWindow(hwnd)) break;
 
-        if (shouldScroll) {
-            bool added = SampleStableLongSelection(&state, hudWnd);
-            if (added) {
-                state.unchangedSteps = 0;
-                InvalidateRect(hudWnd, NULL, FALSE);
-                if (previewWnd && IsWindow(previewWnd)) {
-                    InvalidateRect(previewWnd, NULL, FALSE);
+        bool added = SampleStableLongSelection(&state, hwnd);
+        if (added) {
+            state.unchangedSteps = 0;
+            state.statusText = L"Auto scrolling...";
+            InvalidateRect(hwnd, NULL, FALSE);
+        } else if (!state.lastSampleUnchanged) {
+            state.unchangedSteps = 0;
+            state.statusText = state.pendingStableFrames >= 2 ? L"At bottom or content changed. Verifying..." :
+                                                                 L"Waiting for stable overlap...";
+            InvalidateRect(hwnd, NULL, FALSE);
+        } else {
+            ++state.unchangedSteps;
+            state.statusText = L"Checking for page bottom...";
+            InvalidateRect(hwnd, NULL, FALSE);
+            if (state.unchangedSteps >= 3) {
+                PumpMessagesFor(hwnd, kLongScrollWaitMs * 2);
+                if (state.done || state.cancelled || !IsWindow(hwnd)) break;
+                SendLongScrollStep(&state);
+                PumpMessagesFor(hwnd, kLongScrollWaitMs);
+                if (state.done || state.cancelled || !IsWindow(hwnd)) break;
+
+                if (SampleStableLongSelection(&state, hwnd)) {
+                    state.unchangedSteps = 0;
+                    state.statusText = L"Auto scrolling...";
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    continue;
                 }
-            } else if (!state.lastSampleUnchanged) {
-                state.unchangedSteps = 0;
-            } else if (state.autoScroll && !isManual) {
-                ++state.unchangedSteps;
-                if (state.unchangedSteps >= 3) {
-                    // Try one more settle step to confirm bottom
-                    PumpMessagesFor(hudWnd, kLongScrollWaitMs * 2);
-                    if (state.done || state.cancelled || !IsWindow(hudWnd)) break;
-                    SendLongScrollStep(&state);
-                    PumpMessagesFor(hudWnd, kLongScrollWaitMs);
-                    if (SampleStableLongSelection(&state, hudWnd)) {
-                        state.unchangedSteps = 0;
-                        InvalidateRect(hudWnd, NULL, FALSE);
-                        continue;
-                    }
-                    // Bottom reached!
-                    state.captureLimitReached = true;
-                    PumpMessagesFor(hudWnd, 200);
-                    break;
+                if (!state.lastSampleUnchanged) {
+                    state.unchangedSteps = 0;
+                    state.statusText = L"Waiting for stable overlap...";
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    continue;
                 }
+                if (state.pendingStableFrames >= 2 && AppendPendingLongTail(&state)) {
+                    state.unchangedSteps = 0;
+                    state.statusText = L"Added final tail.";
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    continue;
+                }
+                if (state.pendingStableFrames >= 1 && AppendPendingLongTail(&state)) {
+                    state.unchangedSteps = 0;
+                    state.statusText = L"Added final tail.";
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    continue;
+                }
+                state.captureLimitReached = true;
+                state.statusText = L"Bottom reached.";
+                InvalidateRect(hwnd, NULL, FALSE);
+                PumpMessagesFor(hwnd, 350);
+                break;
             }
         }
     }
 
-    if (g_mouseHook) {
-        UnhookWindowsHookEx(g_mouseHook);
-        g_mouseHook = NULL;
-    }
-
-    if (previewWnd && IsWindow(previewWnd)) DestroyWindow(previewWnd);
-    if (IsWindow(hudWnd)) DestroyWindow(hudWnd);
+    if (IsWindow(hwnd)) DestroyWindow(hwnd);
 
     HBITMAP stitched = NULL;
     if (!state.cancelled) {
         stitched = StitchLongFrames(state.frames, state.w, outH);
     }
     for (LongFrame &frame : state.frames) DeleteObject(frame.bitmap);
+    ClearPendingLongFrame(&state);
     return stitched;
 }
 
