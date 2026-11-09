@@ -38,6 +38,104 @@ static POINT ToImagePoint(EditorState *state, int x, int y) {
     return point;
 }
 
+static void DestroyEditorCaches(EditorState *state) {
+    if (!state) return;
+    if (state->stageCache) {
+        DeleteObject(state->stageCache);
+        state->stageCache = NULL;
+    }
+    state->stageCacheScrollY = -1;
+    if (state->compositeCache) {
+        DeleteObject(state->compositeCache);
+        state->compositeCache = NULL;
+    }
+    state->compositeCacheValid = false;
+}
+
+static void EnsureStageCache(EditorState *state, HDC refDc) {
+    if (!state || state->winW <= 0 || state->winH <= 0) return;
+    if (state->stageCache && state->stageCacheScrollY == state->scrollY) {
+        return;
+    }
+    if (!state->stageCache) {
+        state->stageCache = CreateCompatibleBitmap(refDc, state->winW, state->winH);
+        if (!state->stageCache) return;
+    }
+
+    HDC mem = CreateCompatibleDC(refDc);
+    HGDIOBJ oldMem = SelectObject(mem, state->stageCache);
+
+    RECT bg = {0, 0, state->winW, state->winH};
+    FillRectColor(mem, bg, RGB(12, 16, 24));
+
+    if (state->shot && state->w > 0 && state->h > 0) {
+        HDC source = CreateCompatibleDC(refDc);
+        HGDIOBJ oldSrc = SelectObject(source, state->shot);
+        int visibleH = std::min(state->viewH, state->h - state->scrollY);
+        int sampleH = std::min(state->h - state->scrollY, std::max(16, kToolbarH));
+        SetStretchBltMode(mem, HALFTONE);
+        if (sampleH > 0) {
+            StretchBlt(mem, 0, 0, state->winW, kToolbarH,
+                       source, 0, state->scrollY, state->w, sampleH, SRCCOPY);
+        }
+        if (visibleH > 0) {
+            StretchBlt(mem, 0, kToolbarH, state->winW, state->winH - kToolbarH,
+                       source, 0, state->scrollY, state->w, visibleH, SRCCOPY);
+        }
+        SelectObject(source, oldSrc);
+        DeleteDC(source);
+    }
+
+    RECT toolbar = {0, 0, state->winW, kToolbarH};
+    DrawGlassPanel(mem, toolbar, 0.0f, true, false);
+
+    RECT canvasStage = {0, kToolbarH, state->winW, state->winH};
+    DrawGlassPanel(mem, canvasStage, 0.0f, true, false);
+
+    if (StartGdiplus()) {
+        Graphics graphics(mem);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        Pen shadowOuter(Color(110, 0, 0, 0), 4.0f);
+        Pen shadowInner(Color(160, 0, 0, 0), 2.0f);
+        graphics.DrawRectangle(&shadowOuter, state->imageX - 2, state->imageY - 2, state->w + 3, state->viewH + 3);
+        graphics.DrawRectangle(&shadowInner, state->imageX - 1, state->imageY - 1, state->w + 1, state->viewH + 1);
+    }
+
+    SelectObject(mem, oldMem);
+    DeleteDC(mem);
+    state->stageCacheScrollY = state->scrollY;
+}
+
+static void EnsureCompositeCache(EditorState *state, HDC refDc) {
+    if (!state || !state->shot || state->w <= 0 || state->h <= 0) return;
+    if (state->compositeCache && state->compositeCacheValid &&
+        state->compositeCacheOpsCount == state->ops.size()) {
+        return;
+    }
+    if (!state->compositeCache) {
+        state->compositeCache = CreateCompatibleBitmap(refDc, state->w, state->h);
+        if (!state->compositeCache) return;
+    }
+
+    HDC source = CreateCompatibleDC(refDc);
+    HDC dest = CreateCompatibleDC(refDc);
+    HGDIOBJ oldSource = SelectObject(source, state->shot);
+    HGDIOBJ oldDest = SelectObject(dest, state->compositeCache);
+
+    BitBlt(dest, 0, 0, state->w, state->h, source, 0, 0, SRCCOPY);
+    for (const Annotation &op : state->ops) {
+        DrawAnnotation(dest, op, 0, 0, state->w, state->h, false);
+    }
+
+    SelectObject(source, oldSource);
+    SelectObject(dest, oldDest);
+    DeleteDC(source);
+    DeleteDC(dest);
+
+    state->compositeCacheOpsCount = state->ops.size();
+    state->compositeCacheValid = true;
+}
+
 static bool ScrollEditor(EditorState *state, HWND hwnd, int delta) {
     if (!state || state->h <= state->viewH) return false;
     int old = state->scrollY;
@@ -50,24 +148,7 @@ static bool ScrollEditor(EditorState *state, HWND hwnd, int delta) {
     return false;
 }
 
-static void DrawToolbar(EditorState *state, HDC dc) {
-    RECT toolbar = {0, 0, state->winW, kToolbarH};
-    FillRectColor(dc, toolbar, RGB(12, 16, 24));
-
-    // Refract top slice of the screenshot through the frosted glass toolbar
-    if (state->shot && state->w > 0 && state->h > 0) {
-        HDC source = CreateCompatibleDC(dc);
-        HGDIOBJ old = SelectObject(source, state->shot);
-        int sampleH = std::min(state->h - state->scrollY, std::max(16, kToolbarH));
-        SetStretchBltMode(dc, HALFTONE);
-        StretchBlt(dc, 0, 0, state->winW, kToolbarH,
-                   source, 0, state->scrollY, state->w, std::max(1, sampleH), SRCCOPY);
-        SelectObject(source, old);
-        DeleteDC(source);
-    }
-
-    DrawGlassPanel(dc, toolbar, 0.0f, true, false);
-
+static void DrawToolbarButtons(EditorState *state, HDC dc) {
     int separatorAfter = ToolbarToolGroupEnd();
 
     for (int i = 0; i < ButtonCount(); ++i) {
@@ -76,8 +157,6 @@ static void DrawToolbar(EditorState *state, HDC dc) {
         bool active = isTool && kButtons[i].tool == state->activeTool;
         bool hover = i == state->hoverButton;
 
-        // Only the active drawing tool gets the saturated Apple Blue background;
-        // unselected tools and action buttons use the dark smoked-glass background with color-coded icons
         DrawGlassButton(dc, button, 9.0f, false, active, hover, false, false);
         DrawToolbarIcon(dc, kButtons[i].action, button, active);
 
@@ -122,7 +201,7 @@ HBITMAP ComposeEditorBitmap(EditorState *state) {
     BitBlt(dest, 0, 0, state->w, state->h, source, 0, 0, SRCCOPY);
 
     for (const Annotation &op : state->ops) {
-        DrawAnnotation(dest, op, 0, 0, state->w, state->h);
+        DrawAnnotation(dest, op, 0, 0, state->w, state->h, false);
     }
 
     SelectObject(source, oldSource);
@@ -162,56 +241,54 @@ bool CopyEditor(EditorState *state, HWND hwnd) {
     return true;
 }
 
-static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
-    RECT bg = {0, 0, state->winW, state->winH};
-    FillRectColor(dc, bg, RGB(12, 16, 24));
+static void DrawEditor(EditorState *state, HWND hwnd, HDC dc, const RECT &paint) {
+    EnsureStageCache(state, dc);
+    EnsureCompositeCache(state, dc);
 
-    HDC source = CreateCompatibleDC(dc);
-    HGDIOBJ old = SelectObject(source, state->shot);
+    // 1. Blit pre-blurred frosted glass stage & toolbar backdrop from cache
+    if (state->stageCache) {
+        HDC stageDc = CreateCompatibleDC(dc);
+        HGDIOBJ oldStage = SelectObject(stageDc, state->stageCache);
+        BitBlt(dc, paint.left, paint.top, RectWidth(paint), RectHeight(paint),
+               stageDc, paint.left, paint.top, SRCCOPY);
+        SelectObject(stageDc, oldStage);
+        DeleteDC(stageDc);
+    } else {
+        FillRectColor(dc, paint, RGB(12, 16, 24));
+    }
+
+    // 2. Blit pre-composited screenshot + committed annotations from cache
     int visibleH = std::min(state->viewH, state->h - state->scrollY);
-
-    // Fill the frosted glass stage around the screenshot with blurred ambient refraction
-    if (visibleH > 0) {
-        SetStretchBltMode(dc, HALFTONE);
-        StretchBlt(dc, 0, kToolbarH, state->winW, state->winH - kToolbarH,
-                   source, 0, state->scrollY, state->w, visibleH, SRCCOPY);
-        RECT canvasStage = {0, kToolbarH, state->winW, state->winH};
-        DrawGlassPanel(dc, canvasStage, 0.0f, true, false);
+    HBITMAP imgSource = state->compositeCache ? state->compositeCache : state->shot;
+    if (imgSource && visibleH > 0) {
+        HDC source = CreateCompatibleDC(dc);
+        HGDIOBJ old = SelectObject(source, imgSource);
+        BitBlt(dc, state->imageX, state->imageY, state->w, visibleH, source, 0, state->scrollY, SRCCOPY);
+        SelectObject(source, old);
+        DeleteDC(source);
     }
 
-    // Soft ambient shadow + dual-layer Apple glass border around the screenshot canvas
-    if (StartGdiplus()) {
-        Graphics graphics(dc);
-        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        Pen shadowOuter(Color(110, 0, 0, 0), 4.0f);
-        Pen shadowInner(Color(160, 0, 0, 0), 2.0f);
-        graphics.DrawRectangle(&shadowOuter, state->imageX - 2, state->imageY - 2, state->w + 3, state->viewH + 3);
-        graphics.DrawRectangle(&shadowInner, state->imageX - 1, state->imageY - 1, state->w + 1, state->viewH + 1);
+    // 3. Draw ONLY the single active preview / text-entry annotation on top
+    if (state->drawing || state->textEntry) {
+        int savedClip = SaveDC(dc);
+        IntersectClipRect(dc, state->imageX, state->imageY, state->imageX + state->w, state->imageY + state->viewH);
+        if (state->drawing) {
+            DrawAnnotation(dc, state->preview, state->imageX, state->imageY - state->scrollY,
+                           state->w, state->h, true);
+        }
+        if (state->textEntry) {
+            Annotation text;
+            text.tool = ToolText;
+            text.a = state->textPoint;
+            text.b = state->textPoint;
+            text.text = state->textBuffer;
+            DrawAnnotation(dc, text, state->imageX, state->imageY - state->scrollY,
+                           state->w, state->h, true);
+        }
+        RestoreDC(dc, savedClip);
     }
 
-    BitBlt(dc, state->imageX, state->imageY, state->w, visibleH, source, 0, state->scrollY, SRCCOPY);
-    SelectObject(source, old);
-    DeleteDC(source);
-
-    int savedClip = SaveDC(dc);
-    IntersectClipRect(dc, state->imageX, state->imageY, state->imageX + state->w, state->imageY + state->viewH);
-    for (const Annotation &op : state->ops) {
-        DrawAnnotation(dc, op, state->imageX, state->imageY - state->scrollY, state->w, state->h);
-    }
-    if (state->drawing) {
-        DrawAnnotation(dc, state->preview, state->imageX, state->imageY - state->scrollY, state->w, state->h);
-    }
-    if (state->textEntry) {
-        Annotation text;
-        text.tool = ToolText;
-        text.a = state->textPoint;
-        text.b = state->textPoint;
-        text.text = state->textBuffer + L"_";
-        DrawAnnotation(dc, text, state->imageX, state->imageY - state->scrollY, state->w, state->h);
-    }
-    RestoreDC(dc, savedClip);
-
-    // Crisp luminous Apple glass border around the captured screenshot
+    // 4. Crisp luminous Apple glass border around the captured screenshot
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -246,9 +323,11 @@ static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
         graphics.DrawPath(&thumbBorder, &thumbPath);
     }
 
-    DrawToolbar(state, dc);
+    if (paint.top < kToolbarH) {
+        DrawToolbarButtons(state, dc);
+    }
 
-    // Outer Apple Frosted-Glass Window Border (consistent with Long Capture & Overlay)
+    // Outer Apple Frosted-Glass Window Border
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -273,14 +352,14 @@ static void PaintEditorBuffered(EditorState *state, HWND hwnd, HDC dc, const REC
     if (!memory || !buffer) {
         if (buffer) DeleteObject(buffer);
         if (memory) DeleteDC(memory);
-        DrawEditor(state, hwnd, dc);
+        DrawEditor(state, hwnd, dc, paint);
         return;
     }
 
     HGDIOBJ old = SelectObject(memory, buffer);
     int saved = SaveDC(memory);
     SetViewportOrgEx(memory, -paint.left, -paint.top, NULL);
-    DrawEditor(state, hwnd, memory);
+    DrawEditor(state, hwnd, memory, paint);
     RestoreDC(memory, saved);
     BitBlt(dc, paint.left, paint.top, w, h, memory, 0, 0, SRCCOPY);
     SelectObject(memory, old);
@@ -299,6 +378,7 @@ static void CommitText(EditorState *state) {
     text.b = state->textPoint;
     text.text = state->textBuffer;
     state->ops.push_back(text);
+    state->compositeCacheValid = false;
     state->textBuffer.clear();
     state->textEntry = false;
 }
@@ -317,22 +397,27 @@ static void FinishDrawing(EditorState *state, POINT point) {
 
     if (keep) {
         state->ops.push_back(state->preview);
+        state->compositeCacheValid = false;
     }
     state->drawing = false;
 }
 
 static void HandleAction(EditorState *state, HWND hwnd, Action action, Tool tool) {
     if (action == ActionToolBlur || action == ActionToolArrow || action == ActionToolRect || action == ActionToolText) {
+        if (state->textEntry) CommitText(state);
         state->activeTool = tool;
-        state->textEntry = false;
         state->statusText.clear();
     } else if (action == ActionUndo) {
-        if (!state->ops.empty()) {
+        if (state->textEntry) {
+            state->textBuffer.clear();
+            state->textEntry = false;
+        } else if (!state->ops.empty()) {
             state->ops.pop_back();
+            state->compositeCacheValid = false;
         }
-        state->textEntry = false;
         state->statusText = L"Undo";
     } else if (action == ActionSave) {
+        if (state->textEntry) CommitText(state);
         std::wstring path;
         if (SaveEditor(state, &path)) {
             NotifyAction(hwnd, L"Screenshot saved", path);
@@ -343,6 +428,7 @@ static void HandleAction(EditorState *state, HWND hwnd, Action action, Tool tool
             NotifyAction(hwnd, L"Save failed", L"Could not write the screenshot file.");
         }
     } else if (action == ActionCopy) {
+        if (state->textEntry) CommitText(state);
         if (CopyEditor(state, hwnd)) {
             NotifyAction(hwnd, L"Screenshot copied", L"Image copied to clipboard.");
             state->done = true;
@@ -352,6 +438,12 @@ static void HandleAction(EditorState *state, HWND hwnd, Action action, Tool tool
             NotifyAction(hwnd, L"Copy failed", L"Could not write the image to clipboard.");
         }
     }
+}
+
+static RECT EditorCanvasBounds(const EditorState *state) {
+    RECT r = {state->imageX - 4, state->imageY - 4,
+              state->imageX + state->w + 4, state->imageY + state->viewH + 4};
+    return ClampRect(r, 0, kToolbarH, state->winW, state->winH);
 }
 
 LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -372,13 +464,17 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             POINT pt = {};
             if (GetCursorPos(&pt) && ScreenToClient(hwnd, &pt)) {
                 if (ToolbarHitButton(pt.x, pt.y) != -1) {
-                    SetCursor(LoadCursor(NULL, IDC_HAND));
+                    SetCursor(state->aeroHoverCursor ? state->aeroHoverCursor : LoadCursor(NULL, IDC_HAND));
                     return TRUE;
                 }
-                if (PointInImage(state, pt.x, pt.y)) {
-                    SetCursor(LoadCursor(NULL, state->activeTool == ToolText ? IDC_IBEAM : IDC_CROSS));
+                if (PointInImage(state, pt.x, pt.y) && state->activeTool == ToolText) {
+                    SetCursor(LoadCursor(NULL, IDC_IBEAM));
                     return TRUE;
                 }
+            }
+            if (state->aeroCursor) {
+                SetCursor(state->aeroCursor);
+                return TRUE;
             }
         }
         SetCursor(LoadCursor(NULL, IDC_ARROW));
@@ -388,8 +484,15 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_KEYDOWN:
         if (!state) return 0;
         if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'Z') {
-            if (!state->ops.empty()) state->ops.pop_back();
-            InvalidateRect(hwnd, NULL, FALSE);
+            if (state->textEntry) {
+                state->textBuffer.clear();
+                state->textEntry = false;
+            } else if (!state->ops.empty()) {
+                state->ops.pop_back();
+                state->compositeCacheValid = false;
+            }
+            RECT canvas = EditorCanvasBounds(state);
+            InvalidateRect(hwnd, &canvas, FALSE);
             return 0;
         }
         if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'S') {
@@ -401,6 +504,13 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             return 0;
         }
         if (wParam == VK_ESCAPE) {
+            if (state->textEntry) {
+                state->textBuffer.clear();
+                state->textEntry = false;
+                RECT canvas = EditorCanvasBounds(state);
+                InvalidateRect(hwnd, &canvas, FALSE);
+                return 0;
+            }
             state->done = true;
             DestroyWindow(hwnd);
             return 0;
@@ -427,19 +537,26 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             } else if (wParam == VK_BACK && !state->textBuffer.empty()) {
                 state->textBuffer.pop_back();
             }
-            InvalidateRect(hwnd, NULL, FALSE);
+            RECT canvas = EditorCanvasBounds(state);
+            InvalidateRect(hwnd, &canvas, FALSE);
+            UpdateWindow(hwnd);
             return 0;
         }
         if (wParam == 'B') state->activeTool = ToolBlur;
         else if (wParam == 'A') state->activeTool = ToolArrow;
         else if (wParam == 'R') state->activeTool = ToolRect;
         else if (wParam == 'T') state->activeTool = ToolText;
-        InvalidateRect(hwnd, NULL, FALSE);
+        {
+            RECT toolbarRect = {0, 0, state->winW, kToolbarH};
+            InvalidateRect(hwnd, &toolbarRect, FALSE);
+        }
         return 0;
     case WM_CHAR:
         if (state && state->textEntry && wParam >= 32 && wParam != 127 && state->textBuffer.size() < 120) {
             state->textBuffer.push_back(static_cast<wchar_t>(wParam));
-            InvalidateRect(hwnd, NULL, FALSE);
+            RECT canvas = EditorCanvasBounds(state);
+            InvalidateRect(hwnd, &canvas, FALSE);
+            UpdateWindow(hwnd);
         }
         return 0;
     case WM_LBUTTONDOWN:
@@ -461,7 +578,9 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                     state->textEntry = true;
                     state->textPoint = point;
                     state->textBuffer.clear();
-                    InvalidateRect(hwnd, NULL, FALSE);
+                    RECT canvas = EditorCanvasBounds(state);
+                    InvalidateRect(hwnd, &canvas, FALSE);
+                    UpdateWindow(hwnd);
                 } else {
                     if (state->textEntry) CommitText(state);
                     state->drawing = true;
@@ -482,14 +601,19 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             int my = GET_Y_LPARAM(lParam);
             if (state->drawing) {
                 POINT point = ToImagePoint(state, mx, my);
-                state->preview.b = point;
-                InvalidateRect(hwnd, NULL, FALSE);
+                if (point.x != state->preview.b.x || point.y != state->preview.b.y) {
+                    state->preview.b = point;
+                    RECT canvas = EditorCanvasBounds(state);
+                    InvalidateRect(hwnd, &canvas, FALSE);
+                    UpdateWindow(hwnd);
+                }
             } else {
                 int over = ToolbarHitButton(mx, my);
                 if (over != state->hoverButton) {
                     state->hoverButton = over;
                     RECT toolbarRect = {0, 0, state->winW, kToolbarH};
                     InvalidateRect(hwnd, &toolbarRect, FALSE);
+                    UpdateWindow(hwnd);
                 }
                 if (!state->tracking) {
                     TRACKMOUSEEVENT track = {sizeof(track), TME_LEAVE, hwnd, 0};
@@ -523,7 +647,9 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             ReleaseCapture();
             POINT point = ToImagePoint(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             FinishDrawing(state, point);
-            InvalidateRect(hwnd, NULL, FALSE);
+            RECT canvas = EditorCanvasBounds(state);
+            InvalidateRect(hwnd, &canvas, FALSE);
+            UpdateWindow(hwnd);
         }
         return 0;
     case WM_PAINT: {
@@ -539,6 +665,11 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         if (state) state->done = true;
         DestroyWindow(hwnd);
         return 0;
+    case WM_DESTROY:
+        if (state) {
+            DestroyEditorCaches(state);
+        }
+        return 0;
     }
 
     return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -549,6 +680,8 @@ void RunEditorModal(HINSTANCE instance, HBITMAP shot, int w, int h) {
     state.shot = shot;
     state.w = w;
     state.h = h;
+    state.aeroCursor = CreateAeroGlassCursor(false);
+    state.aeroHoverCursor = CreateAeroGlassCursor(true);
 
     int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -566,7 +699,11 @@ void RunEditorModal(HINSTANCE instance, HBITMAP shot, int w, int h) {
     HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kEditorClass, L"ModernScreenshot",
                                 WS_POPUP, x, y, state.winW, state.winH,
                                 NULL, NULL, instance, &state);
-    if (!hwnd) return;
+    if (!hwnd) {
+        if (state.aeroCursor) DestroyCursor(state.aeroCursor);
+        if (state.aeroHoverCursor) DestroyCursor(state.aeroHoverCursor);
+        return;
+    }
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -578,6 +715,10 @@ void RunEditorModal(HINSTANCE instance, HBITMAP shot, int w, int h) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+
+    DestroyEditorCaches(&state);
+    if (state.aeroCursor) DestroyCursor(state.aeroCursor);
+    if (state.aeroHoverCursor) DestroyCursor(state.aeroHoverCursor);
 }
 
 } // namespace ModernScreenshot

@@ -32,6 +32,6 @@ void DrawGlassButton(HDC dc, const RECT &rect, float radius, bool primary, bool 
 void DrawToolbarIcon(HDC dc, Action action, const RECT &button, bool active);
 void ApplyMosaic(HDC dc, RECT rect);
 void DrawArrow(HDC dc, POINT a, POINT b, COLORREF color);
-void DrawAnnotation(HDC dc, const Annotation &op, int offsetX, int offsetY, int maxW, int maxH);
+void DrawAnnotation(HDC dc, const Annotation &op, int offsetX, int offsetY, int maxW, int maxH, bool isPreview = false);
 
 } // namespace ModernScreenshot

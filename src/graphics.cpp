@@ -754,90 +754,349 @@ void DrawToolbarIcon(HDC dc, Action action, const RECT &button, bool active) {
 }
 
 void ApplyMosaic(HDC dc, RECT rect) {
-    const int block = 12;
-    if (RectWidth(rect) <= 0 || RectHeight(rect) <= 0) {
+    int w = RectWidth(rect);
+    int h = RectHeight(rect);
+    if (!dc || w <= 0 || h <= 0) {
         return;
     }
 
-    for (int y = rect.top; y < rect.bottom; y += block) {
-        int bh = std::min<int>(block, rect.bottom - y);
-        for (int x = rect.left; x < rect.right; x += block) {
-            int bw = std::min<int>(block, rect.right - x);
-            COLORREF color = GetPixel(dc, x + bw / 2, y + bh / 2);
-            RECT tile = {x, y, x + bw, y + bh};
-            FillRectColor(dc, tile, color);
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void *bits = NULL;
+    HBITMAP dib = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!dib || !bits) {
+        if (dib) DeleteObject(dib);
+        return;
+    }
+
+    HDC memDc = CreateCompatibleDC(dc);
+    HGDIOBJ oldObj = SelectObject(memDc, dib);
+    BitBlt(memDc, 0, 0, w, h, dc, rect.left, rect.top, SRCCOPY);
+    GdiFlush();
+
+    BYTE *pixels = static_cast<BYTE *>(bits);
+    const int block = 10;
+
+    for (int by = 0; by < h; by += block) {
+        int bh = std::min(block, h - by);
+        for (int bx = 0; bx < w; bx += block) {
+            int bw = std::min(block, w - bx);
+            int sumB = 0, sumG = 0, sumR = 0, count = 0;
+
+            for (int y = by; y < by + bh; ++y) {
+                const BYTE *row = pixels + static_cast<size_t>(y) * static_cast<size_t>(w) * 4;
+                for (int x = bx; x < bx + bw; ++x) {
+                    sumB += row[x * 4 + 0];
+                    sumG += row[x * 4 + 1];
+                    sumR += row[x * 4 + 2];
+                    ++count;
+                }
+            }
+
+            int avgB = count > 0 ? (sumB / count) : 0;
+            int avgG = count > 0 ? (sumG / count) : 0;
+            int avgR = count > 0 ? (sumR / count) : 0;
+
+            for (int y = by; y < by + bh; ++y) {
+                BYTE *row = pixels + static_cast<size_t>(y) * static_cast<size_t>(w) * 4;
+                bool isTop = (y == by);
+                bool isBot = (y == by + bh - 1);
+                for (int x = bx; x < bx + bw; ++x) {
+                    bool isLeft = (x == bx);
+                    bool isRight = (x == bx + bw - 1);
+                    // Subtle frosted crystal micro-bevel on each mosaic tile
+                    int delta = (isTop || isLeft) ? 6 : ((isBot || isRight) ? -6 : 0);
+                    row[x * 4 + 0] = static_cast<BYTE>(Clamp(avgB + delta, 0, 255));
+                    row[x * 4 + 1] = static_cast<BYTE>(Clamp(avgG + delta, 0, 255));
+                    row[x * 4 + 2] = static_cast<BYTE>(Clamp(avgR + delta, 0, 255));
+                    row[x * 4 + 3] = 255;
+                }
+            }
         }
+    }
+
+    BitBlt(dc, rect.left, rect.top, w, h, memDc, 0, 0, SRCCOPY);
+    SelectObject(memDc, oldObj);
+    DeleteDC(memDc);
+    DeleteObject(dib);
+}
+
+static void DrawGlassSelectionHandles(Graphics *graphics, float left, float top, float right, float bottom) {
+    PointF corners[4] = {
+        PointF(left, top),
+        PointF(right, top),
+        PointF(right, bottom),
+        PointF(left, bottom)
+    };
+    const float r = 4.0f;
+    SolidBrush fill(Color(255, 255, 255, 255));
+    Pen ring(Color(255, 24, 118, 252), 1.6f);
+    Pen shadow(Color(120, 0, 0, 0), 1.2f);
+    for (int i = 0; i < 4; ++i) {
+        graphics->DrawEllipse(&shadow, corners[i].X - r - 0.5f, corners[i].Y - r - 0.5f, r * 2.0f + 1.0f, r * 2.0f + 1.0f);
+        graphics->FillEllipse(&fill, corners[i].X - r, corners[i].Y - r, r * 2.0f, r * 2.0f);
+        graphics->DrawEllipse(&ring, corners[i].X - r, corners[i].Y - r, r * 2.0f, r * 2.0f);
     }
 }
 
 void DrawArrow(HDC dc, POINT a, POINT b, COLORREF color) {
-    double dx = static_cast<double>(b.x - a.x);
-    double dy = static_cast<double>(b.y - a.y);
-    double len = std::sqrt(dx * dx + dy * dy);
-    if (len < 2.0) {
+    (void)color;
+    float ax = static_cast<float>(a.x);
+    float ay = static_cast<float>(a.y);
+    float bx = static_cast<float>(b.x);
+    float by = static_cast<float>(b.y);
+    float dx = bx - ax;
+    float dy = by - ay;
+    float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 3.0f) {
         return;
     }
 
-    double angle = std::atan2(dy, dx);
-    double headLen = 16.0;
-    double headAngle = 0.55;
-    POINT h1 = {b.x - static_cast<int>(std::cos(angle - headAngle) * headLen),
-                b.y - static_cast<int>(std::sin(angle - headAngle) * headLen)};
-    POINT h2 = {b.x - static_cast<int>(std::cos(angle + headAngle) * headLen),
-                b.y - static_cast<int>(std::sin(angle + headAngle) * headLen)};
+    if (!StartGdiplus()) {
+        HPEN pen = CreatePen(PS_SOLID, 3, RGB(56, 189, 248));
+        HGDIOBJ old = SelectObject(dc, pen);
+        MoveToEx(dc, a.x, a.y, NULL);
+        LineTo(dc, b.x, b.y);
+        SelectObject(dc, old);
+        DeleteObject(pen);
+        return;
+    }
 
-    HPEN pen = CreatePen(PS_SOLID, 4, color);
-    HGDIOBJ old = SelectObject(dc, pen);
-    MoveToEx(dc, a.x, a.y, NULL);
-    LineTo(dc, b.x, b.y);
-    LineTo(dc, h1.x, h1.y);
-    MoveToEx(dc, b.x, b.y, NULL);
-    LineTo(dc, h2.x, h2.y);
-    SelectObject(dc, old);
-    DeleteObject(pen);
+    Graphics graphics(dc);
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+
+    float ux = dx / len;
+    float uy = dy / len;
+    float nx = -uy;
+    float ny = ux;
+
+    float headLen = std::min(22.0f, std::max(12.0f, len * 0.28f));
+    float neckDist = headLen * 0.72f;
+    float wingHalfW = headLen * 0.46f;
+    float tailHalfW = 1.6f;
+    float neckHalfW = std::min(4.0f, headLen * 0.19f);
+
+    float neckX = bx - ux * neckDist;
+    float neckY = by - uy * neckDist;
+    float barbX = bx - ux * headLen;
+    float barbY = by - uy * headLen;
+
+    PointF poly[7] = {
+        PointF(ax + nx * tailHalfW, ay + ny * tailHalfW),
+        PointF(neckX + nx * neckHalfW, neckY + ny * neckHalfW),
+        PointF(barbX + nx * wingHalfW, barbY + ny * wingHalfW),
+        PointF(bx, by),
+        PointF(barbX - nx * wingHalfW, barbY - ny * wingHalfW),
+        PointF(neckX - nx * neckHalfW, neckY - ny * neckHalfW),
+        PointF(ax - nx * tailHalfW, ay - ny * tailHalfW)
+    };
+
+    PointF shadowPoly[7];
+    for (int i = 0; i < 7; ++i) {
+        shadowPoly[i] = PointF(poly[i].X + 1.5f, poly[i].Y + 2.0f);
+    }
+
+    GraphicsPath shadowPath;
+    shadowPath.AddPolygon(shadowPoly, 7);
+    SolidBrush shadowBrush(Color(110, 0, 0, 0));
+    Pen shadowPen(Color(65, 0, 0, 0), 2.0f);
+    shadowPen.SetLineJoin(Gdiplus::LineJoinRound);
+    graphics.FillPath(&shadowBrush, &shadowPath);
+    graphics.DrawPath(&shadowPen, &shadowPath);
+
+    GraphicsPath arrowPath;
+    arrowPath.AddPolygon(poly, 7);
+
+    // Apple Electric Sky-Cyan to System Blue gradient fill
+    Gdiplus::LinearGradientBrush arrowFill(
+        PointF(ax, ay), PointF(bx, by),
+        Color(250, 56, 189, 248),
+        Color(255, 24, 118, 252));
+    graphics.FillPath(&arrowFill, &arrowPath);
+
+    // Crisp luminous white-cyan glass specular outline
+    Pen specularRim(Color(230, 224, 242, 254), 1.1f);
+    specularRim.SetLineJoin(Gdiplus::LineJoinRound);
+    graphics.DrawPath(&specularRim, &arrowPath);
 }
 
-void DrawAnnotation(HDC dc, const Annotation &op, int offsetX, int offsetY, int maxW, int maxH) {
+void DrawAnnotation(HDC dc, const Annotation &op, int offsetX, int offsetY, int maxW, int maxH, bool isPreview) {
     POINT a = {op.a.x + offsetX, op.a.y + offsetY};
     POINT b = {op.b.x + offsetX, op.b.y + offsetY};
 
     if (op.tool == ToolBlur) {
         RECT rect = NormalizeRectPoints(a, b);
         rect = ClampRect(rect, offsetX, offsetY, offsetX + maxW, offsetY + maxH);
+        int rw = RectWidth(rect);
+        int rh = RectHeight(rect);
+        if (rw <= 0 || rh <= 0) return;
+
         ApplyMosaic(dc, rect);
-        HPEN pen = CreatePen(PS_SOLID, 2, RGB(255, 207, 90));
-        HGDIOBJ oldPen = SelectObject(dc, pen);
-        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-        Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
-        SelectObject(dc, oldBrush);
-        SelectObject(dc, oldPen);
-        DeleteObject(pen);
+
+        if (StartGdiplus()) {
+            Graphics graphics(dc);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            float fx = static_cast<float>(rect.left);
+            float fy = static_cast<float>(rect.top);
+            float fw = static_cast<float>(rw);
+            float fh = static_cast<float>(rh);
+
+            if (isPreview) {
+                Pen outerGlow(Color(90, 24, 118, 252), 3.0f);
+                Pen guideBorder(Color(240, 56, 189, 248), 1.6f);
+                Pen innerRim(Color(150, 255, 255, 255), 1.0f);
+                graphics.DrawRectangle(&outerGlow, fx - 1.0f, fy - 1.0f, fw + 2.0f, fh + 2.0f);
+                graphics.DrawRectangle(&guideBorder, fx, fy, fw, fh);
+                if (rw > 2 && rh > 2) {
+                    graphics.DrawRectangle(&innerRim, fx + 1.0f, fy + 1.0f, fw - 2.0f, fh - 2.0f);
+                }
+                DrawGlassSelectionHandles(&graphics, fx, fy, fx + fw, fy + fh);
+            } else {
+                // Subtle 1px frosted glass bevel on committed mosaic
+                Pen glassEdge(Color(65, 255, 255, 255), 1.0f);
+                graphics.DrawRectangle(&glassEdge, fx, fy, fw - 1.0f, fh - 1.0f);
+            }
+        }
     } else if (op.tool == ToolRect) {
         RECT rect = NormalizeRectPoints(a, b);
         rect = ClampRect(rect, offsetX, offsetY, offsetX + maxW, offsetY + maxH);
-        HPEN pen = CreatePen(PS_SOLID, 2, RGB(239, 68, 68));
-        HGDIOBJ oldPen = SelectObject(dc, pen);
-        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-        Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
-        SelectObject(dc, oldBrush);
-        SelectObject(dc, oldPen);
-        DeleteObject(pen);
+        int rw = RectWidth(rect);
+        int rh = RectHeight(rect);
+        if (rw <= 0 || rh <= 0) return;
+
+        if (StartGdiplus()) {
+            Graphics graphics(dc);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            float fx = static_cast<float>(rect.left);
+            float fy = static_cast<float>(rect.top);
+            float fw = static_cast<float>(rw);
+            float fh = static_cast<float>(rh);
+            float rad = std::min(6.0f, std::min(fw, fh) * 0.2f);
+
+            GraphicsPath shadowPath, outerPath, innerPath;
+            BuildRoundedRectPath(&shadowPath, fx + 1.0f, fy + 1.5f, fw, fh, rad);
+            BuildRoundedRectPath(&outerPath, fx, fy, fw, fh, rad);
+
+            // Soft drop shadow + outer electric blue aura
+            Pen darkShadow(Color(115, 0, 0, 0), 3.6f);
+            Pen blueAura(Color(85, 24, 118, 252), 4.2f);
+            graphics.DrawPath(&darkShadow, &shadowPath);
+            graphics.DrawPath(&blueAura, &outerPath);
+
+            // Subtle translucent glass tint inside selection box while dragging
+            if (isPreview) {
+                SolidBrush previewTint(Color(18, 56, 189, 248));
+                graphics.FillPath(&previewTint, &outerPath);
+            }
+
+            // Main luminous Sky-Cyan to Electric Blue gradient stroke
+            Gdiplus::LinearGradientBrush strokeGrad(
+                PointF(fx, fy), PointF(fx + fw, fy + fh),
+                Color(255, 56, 189, 248),
+                Color(255, 24, 118, 252));
+            Pen mainPen(&strokeGrad, 2.2f);
+            graphics.DrawPath(&mainPen, &outerPath);
+
+            // 1px inner white specular glass rim
+            if (fw > 4.0f && fh > 4.0f) {
+                BuildRoundedRectPath(&innerPath, fx + 1.2f, fy + 1.2f, fw - 2.4f, fh - 2.4f, std::max(1.0f, rad - 1.0f));
+                Pen innerRim(Color(165, 255, 255, 255), 1.0f);
+                graphics.DrawPath(&innerRim, &innerPath);
+            }
+
+            if (isPreview) {
+                DrawGlassSelectionHandles(&graphics, fx, fy, fx + fw, fy + fh);
+            }
+        } else {
+            HPEN pen = CreatePen(PS_SOLID, 2, RGB(56, 189, 248));
+            HGDIOBJ oldPen = SelectObject(dc, pen);
+            HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+            Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
+            SelectObject(dc, oldBrush);
+            SelectObject(dc, oldPen);
+            DeleteObject(pen);
+        }
     } else if (op.tool == ToolArrow) {
-        DrawArrow(dc, a, b, RGB(245, 158, 11));
+        DrawArrow(dc, a, b, RGB(56, 189, 248));
+        if (isPreview && StartGdiplus()) {
+            Graphics graphics(dc);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            SolidBrush fill(Color(255, 255, 255, 255));
+            Pen ring(Color(255, 24, 118, 252), 1.5f);
+            graphics.FillEllipse(&fill, static_cast<float>(a.x) - 3.5f, static_cast<float>(a.y) - 3.5f, 7.0f, 7.0f);
+            graphics.DrawEllipse(&ring, static_cast<float>(a.x) - 3.5f, static_cast<float>(a.y) - 3.5f, 7.0f, 7.0f);
+        }
     } else if (op.tool == ToolText) {
-        SIZE size;
-        HFONT font = CreateFontW(-18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-        HGDIOBJ oldFont = SelectObject(dc, font);
-        GetTextExtentPoint32W(dc, op.text.c_str(), static_cast<int>(op.text.size()), &size);
-        RECT bg = {a.x - 8, a.y - size.cy - 6, a.x + size.cx + 10, a.y + 6};
-        DrawGlassPanel(dc, bg, 8.0f, true, false);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(248, 250, 252));
-        TextOutW(dc, a.x, a.y - size.cy, op.text.c_str(), static_cast<int>(op.text.size()));
+        std::wstring displayText = op.text;
+        bool isEmptyPlaceholder = false;
+        if (isPreview) {
+            if (!displayText.empty() && displayText.back() == L'_') {
+                displayText.pop_back();
+            }
+            if (displayText.empty()) {
+                displayText = L"Type text...";
+                isEmptyPlaceholder = true;
+            }
+        }
+        if (displayText.empty()) return;
+
+        SIZE size = {80, 20};
+        HFONT measureFont = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                        DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HGDIOBJ oldFont = SelectObject(dc, measureFont);
+        GetTextExtentPoint32W(dc, displayText.c_str(), static_cast<int>(displayText.size()), &size);
         SelectObject(dc, oldFont);
-        DeleteObject(font);
+        DeleteObject(measureFont);
+
+        int padLeft = 14;
+        int padRight = 14;
+        int boxH = std::max<int>(30, size.cy + 12);
+        int boxW = std::max<int>(44, size.cx + padLeft + padRight);
+        int topY = std::max(offsetY + 2, static_cast<int>(a.y - boxH + 6));
+        int leftX = std::max(offsetX + 2, static_cast<int>(a.x - 4));
+        RECT bg = {leftX, topY, leftX + boxW, topY + boxH};
+
+        DrawGlassPanel(dc, bg, 9.0f, true, isPreview);
+
+        if (StartGdiplus()) {
+            Graphics graphics(dc);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+            // Glowing left vertical sky-cyan accent pill inside the text badge
+            GraphicsPath barPath;
+            BuildRoundedRectPath(&barPath, static_cast<float>(bg.left + 6), static_cast<float>(bg.top + 6),
+                                 3.0f, static_cast<float>(boxH - 12), 1.5f);
+            SolidBrush barBrush(Color(255, 56, 189, 248));
+            graphics.FillPath(&barBrush, &barPath);
+
+            Font font(L"Segoe UI", 13.5f, isEmptyPlaceholder ? FontStyleRegular : FontStyleBold, UnitPixel);
+            SolidBrush textBrush(isEmptyPlaceholder ? Color(185, 186, 204, 226) : Color(255, 255, 255, 255));
+            PointF textPt(static_cast<float>(bg.left + padLeft),
+                          static_cast<float>(bg.top + (boxH - size.cy) / 2 - 1));
+            graphics.DrawString(displayText.c_str(), -1, &font, textPt, &textBrush);
+
+            if (isPreview) {
+                float caretX = isEmptyPlaceholder
+                                   ? static_cast<float>(bg.left + padLeft)
+                                   : static_cast<float>(bg.left + padLeft + size.cx + 2);
+                Pen caretPen(Color(255, 56, 189, 248), 2.0f);
+                graphics.DrawLine(&caretPen, caretX, static_cast<float>(bg.top + 7),
+                                  caretX, static_cast<float>(bg.bottom - 7));
+            }
+        } else {
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(248, 250, 252));
+            TextOutW(dc, bg.left + padLeft, bg.top + 6, displayText.c_str(), static_cast<int>(displayText.size()));
+        }
     }
 }
 

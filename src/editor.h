@@ -7,6 +7,13 @@ namespace ModernScreenshot {
 
 struct EditorState {
     HBITMAP shot = NULL;
+    HBITMAP stageCache = NULL;
+    int stageCacheScrollY = -1;
+    HBITMAP compositeCache = NULL;
+    size_t compositeCacheOpsCount = 0;
+    bool compositeCacheValid = false;
+    HCURSOR aeroCursor = NULL;
+    HCURSOR aeroHoverCursor = NULL;
     int w = 0;
     int h = 0;
     int winW = 0;
