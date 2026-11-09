@@ -5,13 +5,29 @@
 
 namespace ModernScreenshot {
 
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
+static void ExcludeWindowFromCapture(HWND hwnd) {
+    if (!hwnd) return;
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (!user32) return;
+    typedef BOOL(WINAPI * SetAffinityFn)(HWND, DWORD);
+    SetAffinityFn setAffinity = reinterpret_cast<SetAffinityFn>(
+        reinterpret_cast<void *>(GetProcAddress(user32, "SetWindowDisplayAffinity")));
+    if (setAffinity) {
+        setAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+    }
+}
+
 static bool IsOwnWindow(HWND hwnd) {
     while (hwnd) {
         wchar_t className[96] = {};
         GetClassNameW(hwnd, className, 96);
         if (wcscmp(className, kHiddenClass) == 0 || wcscmp(className, kOverlayClass) == 0 ||
             wcscmp(className, kLongSessionClass) == 0 || wcscmp(className, kEditorClass) == 0 ||
-            wcscmp(className, kSettingsClass) == 0) {
+            wcscmp(className, kSettingsClass) == 0 || wcscmp(className, kTrayPopupClass) == 0) {
             return true;
         }
         hwnd = GetParent(hwnd);
@@ -34,16 +50,28 @@ static void FocusLongTarget(LongSessionState *state) {
     if (IsIconic(state->targetRoot)) {
         ShowWindow(state->targetRoot, SW_RESTORE);
     }
-    SetForegroundWindow(state->targetRoot);
+    if (GetForegroundWindow() != state->targetRoot) {
+        SetForegroundWindow(state->targetRoot);
+    }
 }
 
-static bool SendLongScrollStep(LongSessionState *state) {
+static bool IsCursorOverControlWindow(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return false;
+    POINT pt = {};
+    if (!GetCursorPos(&pt)) return false;
+    RECT winRect = {};
+    if (!GetWindowRect(hwnd, &winRect)) return false;
+    InflateRect(&winRect, 12, 12);
+    return PointInRect(pt.x, pt.y, winRect);
+}
+
+static bool SendLongScrollStep(LongSessionState *state, bool useMessageFallback) {
     if (!state || !state->target || !IsWindow(state->target)) {
         return false;
     }
     POINT center = {state->selection.left + state->w / 2, state->selection.top + state->h / 2};
     FocusLongTarget(state);
-    SetCursorPos(center.x, center.y);
+
     HWND pointTarget = WindowAtPointForScroll(center, state->target);
     if (pointTarget && IsWindow(pointTarget)) {
         state->target = pointTarget;
@@ -52,23 +80,69 @@ static bool SendLongScrollStep(LongSessionState *state) {
             state->targetRoot = root;
         }
     }
+
+    // Keep cursor inside selection only if the user hasn't moved it outside the capture region
+    POINT curPt = {};
+    if (GetCursorPos(&curPt)) {
+        if (PointInRect(curPt.x, curPt.y, state->selection)) {
+            center = curPt;
+        } else {
+            SetCursorPos(center.x, center.y);
+        }
+    }
+
     INPUT input = {};
     input.type = INPUT_MOUSE;
     input.mi.dwFlags = MOUSEEVENTF_WHEEL;
     input.mi.mouseData = static_cast<DWORD>(-WHEEL_DELTA);
-    return SendInput(1, &input, sizeof(input)) == 1;
+    bool sent = SendInput(1, &input, sizeof(input)) == 1;
+
+    if (useMessageFallback && state->target && IsWindow(state->target)) {
+        LPARAM lParam = MAKELPARAM(center.x, center.y);
+        WPARAM wParam = MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA));
+        PostMessageW(state->target, WM_MOUSEWHEEL, wParam, lParam);
+        sent = true;
+    }
+    return sent;
 }
 
-static void PumpMessagesFor(HWND hwnd, int milliseconds) {
-    DWORD end = GetTickCount() + static_cast<DWORD>(milliseconds);
+static void CheckGlobalSessionHotkeys(HWND hwnd, LongSessionState *state) {
+    if (!state || state->done) return;
+    bool escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    bool enterDown = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+
+    if (!state->keyDebounceDone) {
+        if (!escDown && !enterDown) {
+            state->keyDebounceDone = true;
+        }
+        return;
+    }
+
+    if (escDown) {
+        state->cancelled = true;
+        state->done = true;
+        if (hwnd && IsWindow(hwnd)) DestroyWindow(hwnd);
+    } else if (enterDown) {
+        state->done = true;
+        if (hwnd && IsWindow(hwnd)) DestroyWindow(hwnd);
+    }
+}
+
+static void PumpMessagesFor(HWND hwnd, LongSessionState *state, int milliseconds) {
+    DWORD start = GetTickCount();
+    DWORD waitMs = static_cast<DWORD>(std::max(0, milliseconds));
     MSG msg;
     do {
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        CheckGlobalSessionHotkeys(hwnd, state);
+        if (!state || state->done || state->cancelled || !IsWindow(hwnd)) {
+            break;
+        }
         Sleep(10);
-    } while (GetTickCount() < end && IsWindow(hwnd));
+    } while ((GetTickCount() - start) < waitMs && IsWindow(hwnd));
 }
 
 static void ClearPendingLongFrame(LongSessionState *state) {
@@ -81,51 +155,129 @@ static void ClearPendingLongFrame(LongSessionState *state) {
     state->pendingStableFrames = 0;
 }
 
-static bool AppendLongFrameStrip(LongSessionState *state, HBITMAP bitmap, int overlap) {
-    if (!state || !bitmap) return false;
-    if (state->totalH >= kLongCaptureMaxHeight ||
-        static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
-        state->captureLimitReached = true;
-        return false;
-    }
-
-    int copyH = state->h - overlap;
-    if (state->totalH + copyH > kLongCaptureMaxHeight) {
-        copyH = kLongCaptureMaxHeight - state->totalH;
-    }
-    if (copyH <= 0) return false;
-
-    HBITMAP strip = CopyBitmapStrip(bitmap, state->w, overlap, copyH);
-    if (!strip) return false;
-    state->frames.push_back({strip, copyH});
-    state->totalH += copyH;
-    state->lastCopyH = copyH;
-    state->skippedFrames = 0;
-    return true;
+static inline void ActiveXBounds(int w, int *outX0, int *outX1) {
+    int marginL = std::min(12, w / 16);
+    int marginR = std::min(22, w / 10); // Exclude right-side scrollbar
+    int x0 = std::max(0, marginL);
+    int x1 = std::max(x0 + 1, w - marginR);
+    *outX0 = x0;
+    *outX1 = x1;
 }
 
-static inline unsigned int PixelAt(const std::vector<BYTE> &pixels, int w, int x, int y) {
-    size_t index = (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 4;
-    return static_cast<unsigned int>(pixels[index]) |
-           (static_cast<unsigned int>(pixels[index + 1]) << 8) |
-           (static_cast<unsigned int>(pixels[index + 2]) << 16);
+static inline int PixelLumaAt(const BYTE *rowPtr, int x) {
+    const BYTE *p = rowPtr + static_cast<size_t>(x) * 4;
+    // Fast integer approximation of Rec.601 luma: (R*77 + G*150 + B*29) >> 8
+    return (static_cast<int>(p[2]) * 77 + static_cast<int>(p[1]) * 150 + static_cast<int>(p[0]) * 29) >> 8;
 }
 
-static inline int PixelAbsDiff(unsigned int a, unsigned int b) {
-    int db = static_cast<int>(a & 0xff) - static_cast<int>(b & 0xff);
-    int dg = static_cast<int>((a >> 8) & 0xff) - static_cast<int>((b >> 8) & 0xff);
-    int dr = static_cast<int>((a >> 16) & 0xff) - static_cast<int>((b >> 16) & 0xff);
-    return std::abs(db) + std::abs(dg) + std::abs(dr);
+static inline int PixelAbsDiffAt(const BYTE *rowA, const BYTE *rowB, int x) {
+    const BYTE *a = rowA + static_cast<size_t>(x) * 4;
+    const BYTE *b = rowB + static_cast<size_t>(x) * 4;
+    return std::abs(static_cast<int>(a[0]) - static_cast<int>(b[0])) +
+           std::abs(static_cast<int>(a[1]) - static_cast<int>(b[1])) +
+           std::abs(static_cast<int>(a[2]) - static_cast<int>(b[2]));
+}
+
+static void ComputeRowSignatures(const std::vector<BYTE> &pixels, int w, int h,
+                                 std::vector<RowSignature> *outSigs) {
+    if (!outSigs) return;
+    outSigs->assign(static_cast<size_t>(std::max(0, h)), RowSignature{});
+    if (w <= 0 || h <= 0 || pixels.size() < static_cast<size_t>(w) * static_cast<size_t>(h) * 4) {
+        return;
+    }
+
+    int x0 = 0, x1 = w;
+    ActiveXBounds(w, &x0, &x1);
+    int activeW = std::max(1, x1 - x0);
+    int xStep = std::max(1, activeW / 96);
+
+    for (int y = 0; y < h; ++y) {
+        const BYTE *row = pixels.data() + static_cast<size_t>(y) * static_cast<size_t>(w) * 4;
+        RowSignature &sig = (*outSigs)[static_cast<size_t>(y)];
+
+        int totalLuma = 0;
+        int totalSamples = 0;
+        int totalGrad = 0;
+        int prevLuma = PixelLumaAt(row, x0);
+
+        int binSum[kRowProfileBins] = {};
+        int binCount[kRowProfileBins] = {};
+
+        for (int x = x0; x < x1; x += xStep) {
+            int lum = PixelLumaAt(row, x);
+            totalLuma += lum;
+            totalGrad += std::abs(lum - prevLuma);
+            prevLuma = lum;
+            ++totalSamples;
+
+            int bin = ((x - x0) * kRowProfileBins) / activeW;
+            if (bin < 0) bin = 0;
+            if (bin >= kRowProfileBins) bin = kRowProfileBins - 1;
+            binSum[bin] += lum;
+            ++binCount[bin];
+        }
+
+        sig.meanLuma = totalSamples > 0 ? (totalLuma / totalSamples) : 0;
+        // Scale horizontal gradient so text/icon rows stand out clearly
+        sig.horizGrad = totalSamples > 0 ? std::min(255, (totalGrad * 2) / totalSamples) : 0;
+
+        for (int b = 0; b < kRowProfileBins; ++b) {
+            sig.bins[b] = static_cast<unsigned char>(
+                binCount[b] > 0 ? (binSum[b] / binCount[b]) : sig.meanLuma);
+        }
+    }
+
+    for (int y = 0; y < h; ++y) {
+        RowSignature &sig = (*outSigs)[static_cast<size_t>(y)];
+        int nextY = (y + 1 < h) ? (y + 1) : (y > 0 ? y - 1 : 0);
+        const RowSignature &nextSig = (*outSigs)[static_cast<size_t>(nextY)];
+        int vDiff = std::abs(sig.meanLuma - nextSig.meanLuma);
+        for (int b = 0; b < kRowProfileBins; ++b) {
+            vDiff += std::abs(static_cast<int>(sig.bins[b]) - static_cast<int>(nextSig.bins[b]));
+        }
+        sig.vertGrad = std::min(255, vDiff / (kRowProfileBins + 1));
+    }
+}
+
+static int RowSignatureDiff(const RowSignature &a, const RowSignature &b) {
+    int diff = std::abs(a.meanLuma - b.meanLuma) * 2 + std::abs(a.horizGrad - b.horizGrad) * 2;
+    for (int i = 0; i < kRowProfileBins; ++i) {
+        diff += std::abs(static_cast<int>(a.bins[i]) - static_cast<int>(b.bins[i]));
+    }
+    return diff / (kRowProfileBins + 4);
+}
+
+static int RowPixelDiff(const std::vector<BYTE> &prev, const std::vector<BYTE> &next,
+                        int w, int prevY, int nextY) {
+    int x0 = 0, x1 = w;
+    ActiveXBounds(w, &x0, &x1);
+    int activeW = std::max(1, x1 - x0);
+    int xStep = std::max(1, activeW / 64);
+
+    const BYTE *rowA = prev.data() + static_cast<size_t>(prevY) * static_cast<size_t>(w) * 4;
+    const BYTE *rowB = next.data() + static_cast<size_t>(nextY) * static_cast<size_t>(w) * 4;
+
+    int sum = 0;
+    int count = 0;
+    for (int x = x0; x < x1; x += xStep) {
+        sum += PixelAbsDiffAt(rowA, rowB, x);
+        ++count;
+    }
+    return count > 0 ? (sum / count) : 255;
 }
 
 static int AverageFrameDiff(const std::vector<BYTE> &a, const std::vector<BYTE> &b, int w, int h) {
-    int xStep = std::max(1, w / 32);
-    int yStep = std::max(1, h / 32);
+    int x0 = 0, x1 = w;
+    ActiveXBounds(w, &x0, &x1);
+    int xStep = std::max(1, (x1 - x0) / 36);
+    int yStep = std::max(1, h / 36);
     long long diff = 0;
     int samples = 0;
     for (int y = 0; y < h; y += yStep) {
-        for (int x = 0; x < w; x += xStep) {
-            diff += PixelAbsDiff(PixelAt(a, w, x, y), PixelAt(b, w, x, y));
+        const BYTE *rowA = a.data() + static_cast<size_t>(y) * static_cast<size_t>(w) * 4;
+        const BYTE *rowB = b.data() + static_cast<size_t>(y) * static_cast<size_t>(w) * 4;
+        for (int x = x0; x < x1; x += xStep) {
+            diff += PixelAbsDiffAt(rowA, rowB, x);
             ++samples;
         }
     }
@@ -137,84 +289,316 @@ static bool IsSameFramePixels(const std::vector<BYTE> &a, const std::vector<BYTE
            (a.empty() || std::memcmp(a.data(), b.data(), a.size()) == 0);
 }
 
-static int OverlapError(const std::vector<BYTE> &prev, const std::vector<BYTE> &next, int w, int h, int overlap) {
-    // Exclude rightmost margin to ignore scrolling scrollbars
-    int marginR = std::min(18, w / 10);
-    int activeW = std::max(1, w - marginR);
+static void DetectStaticBorders(const std::vector<BYTE> &prev, const std::vector<BYTE> &next,
+                                const std::vector<RowSignature> &prevSig,
+                                const std::vector<RowSignature> &nextSig,
+                                int w, int h, int *outTopStatic, int *outBotStatic) {
+    int maxBorder = std::min(h / 4, 160);
 
-    int xStep = std::max(1, activeW / 56);
-    int yStep = std::max(1, overlap / 56);
-    long long diff = 0;
-    int samples = 0;
-    for (int y = 0; y < overlap; y += yStep) {
-        int prevY = h - overlap + y;
-        for (int x = 0; x < activeW; x += xStep) {
-            diff += PixelAbsDiff(PixelAt(prev, w, x, prevY), PixelAt(next, w, x, y));
-            ++samples;
+    int topStatic = 0;
+    int topTexturedMatches = 0;
+    for (int y = 0; y < maxBorder; ++y) {
+        int diff = RowPixelDiff(prev, next, w, y, y);
+        if (diff <= 4) {
+            topStatic = y + 1;
+            if (prevSig[static_cast<size_t>(y)].horizGrad >= 4 &&
+                nextSig[static_cast<size_t>(y)].horizGrad >= 4) {
+                ++topTexturedMatches;
+            }
+        } else {
+            break;
         }
     }
-    return samples > 0 ? static_cast<int>(diff / samples) : 255;
+    // Only treat top border as a sticky header if it contains actual stationary UI/text
+    if (topTexturedMatches < 2) {
+        topStatic = 0;
+    }
+
+    int botStatic = 0;
+    int botTexturedMatches = 0;
+    for (int i = 0; i < maxBorder; ++i) {
+        int y = h - 1 - i;
+        if (y <= topStatic + 32) break;
+        int diff = RowPixelDiff(prev, next, w, y, y);
+        if (diff <= 4) {
+            botStatic = i + 1;
+            if (prevSig[static_cast<size_t>(y)].horizGrad >= 4 &&
+                nextSig[static_cast<size_t>(y)].horizGrad >= 4) {
+                ++botTexturedMatches;
+            }
+        } else {
+            break;
+        }
+    }
+    if (botTexturedMatches < 2) {
+        botStatic = 0;
+    }
+
+    *outTopStatic = topStatic;
+    *outBotStatic = botStatic;
 }
 
-static int EstimateOverlap(const std::vector<BYTE> &prev, const std::vector<BYTE> &next, int w, int h, int *outError) {
-    if (w <= 0 || h <= 1) {
-        if (outError) *outError = 255 * 3;
+static void VerifyShift2D(const std::vector<BYTE> &prev, const std::vector<BYTE> &next,
+                          const std::vector<RowSignature> &prevSig,
+                          const std::vector<RowSignature> &nextSig,
+                          int w, int h, int shift, int topStatic, int botStatic,
+                          int *outOverallError, int *outTexturedError, int *outTexturedRows) {
+    int yStart = topStatic + shift;
+    int yEnd = h - botStatic;
+    int overlapH = yEnd - yStart;
+    if (overlapH <= 16) {
+        *outOverallError = 255 * 3;
+        *outTexturedError = 255 * 3;
+        *outTexturedRows = 0;
+        return;
+    }
+
+    int yStep = std::max(1, overlapH / 96);
+    long long totalErr = 0;
+    int totalRows = 0;
+    long long texErr = 0;
+    int texRows = 0;
+
+    for (int prevY = yStart; prevY < yEnd; prevY += yStep) {
+        int nextY = prevY - shift;
+        int rowErr = RowPixelDiff(prev, next, w, prevY, nextY);
+        totalErr += rowErr;
+        ++totalRows;
+
+        int grad = std::max(prevSig[static_cast<size_t>(prevY)].horizGrad,
+                            nextSig[static_cast<size_t>(nextY)].horizGrad);
+        if (grad >= 3) {
+            texErr += rowErr;
+            ++texRows;
+        }
+    }
+
+    *outOverallError = totalRows > 0 ? static_cast<int>(totalErr / totalRows) : 255 * 3;
+    *outTexturedError = texRows > 0 ? static_cast<int>(texErr / texRows) : *outOverallError;
+    *outTexturedRows = texRows;
+}
+
+static int FindOptimalSeamRow(const std::vector<BYTE> &prev, const std::vector<BYTE> &next,
+                              const std::vector<RowSignature> &prevSig,
+                              int w, int h, int shift, int topStatic, int botStatic,
+                              int minAllowedPrevY) {
+    int overlapStart = std::max(topStatic + shift, minAllowedPrevY);
+    int overlapEnd = h - botStatic;
+    if (overlapEnd <= overlapStart) {
+        return std::min(h, std::max(minAllowedPrevY, h - botStatic));
+    }
+
+    // Search in the lower half of the valid overlap (above botStatic) for the cleanest inter-line seam
+    int searchWindow = std::min(80, std::max(16, (overlapEnd - overlapStart) / 2));
+    int rStart = std::max(overlapStart, overlapEnd - searchWindow);
+    int rEnd = overlapEnd;
+
+    int bestRow = rEnd;
+    int bestCost = 1000000;
+
+    for (int r = rStart; r < rEnd; ++r) {
+        int nextY = r - shift;
+        if (nextY < 0 || nextY >= h) continue;
+        int matchDiff = RowPixelDiff(prev, next, w, r, nextY);
+        const RowSignature &sig = prevSig[static_cast<size_t>(r)];
+        // Prefer rows where prev & next match closely AND vertical/horizontal gradients are minimal (whitespace between lines)
+        int cost = matchDiff * 4 + sig.vertGrad * 2 + sig.horizGrad;
+        if (cost < bestCost) {
+            bestCost = cost;
+            bestRow = r;
+        }
+    }
+    return bestRow;
+}
+
+static int EstimateScrollShift(const std::vector<BYTE> &prev, const std::vector<BYTE> &next,
+                               const std::vector<RowSignature> &prevSig,
+                               const std::vector<RowSignature> &nextSig,
+                               int w, int h, int expectedShift, int minAllowedPrevY,
+                               int *outBestError, int *outSeamRow) {
+    if (outBestError) *outBestError = 255 * 3;
+    if (outSeamRow) *outSeamRow = h;
+    if (w <= 0 || h <= 32) return 0;
+
+    int topStatic = 0;
+    int botStatic = 0;
+    DetectStaticBorders(prev, next, prevSig, nextSig, w, h, &topStatic, &botStatic);
+
+    int activeH = h - topStatic - botStatic;
+    int minOverlap = std::max(36, activeH / 6);
+    int maxShift = activeH - minOverlap;
+    if (maxShift < 2) return 0;
+
+    // 1-pixel resolution 1D signature correlation across every candidate shift
+    std::vector<int> sigScore(static_cast<size_t>(maxShift + 1), 255 * 3);
+    for (int shift = 2; shift <= maxShift; ++shift) {
+        int yStart = topStatic + shift;
+        int yEnd = h - botStatic;
+        long long weightedDiff = 0;
+        long long weightSum = 0;
+        int texturedCount = 0;
+
+        for (int prevY = yStart; prevY < yEnd; ++prevY) {
+            int nextY = prevY - shift;
+            const RowSignature &ps = prevSig[static_cast<size_t>(prevY)];
+            const RowSignature &ns = nextSig[static_cast<size_t>(nextY)];
+            int rDiff = RowSignatureDiff(ps, ns);
+            int grad = std::max(ps.horizGrad, ns.horizGrad);
+            int weight = 1 + std::min(16, grad / 3);
+            if (grad >= 3) ++texturedCount;
+            weightedDiff += static_cast<long long>(rDiff) * weight;
+            weightSum += weight;
+        }
+
+        if (weightSum > 0) {
+            int score = static_cast<int>(weightedDiff / weightSum);
+            if (texturedCount < 3) {
+                score += 18; // Penalize shifts that only overlap featureless blank space
+            }
+            sigScore[static_cast<size_t>(shift)] = score;
+        }
+    }
+
+    // Select up to 8 top local minima from the 1px-resolution 1D score curve for full 2D pixel verification
+    struct Candidate {
+        int shift;
+        int score1D;
+    };
+    std::vector<Candidate> candidates;
+    for (int shift = 2; shift <= maxShift; ++shift) {
+        int s = sigScore[static_cast<size_t>(shift)];
+        bool isLocalMin = true;
+        if (shift > 2 && sigScore[static_cast<size_t>(shift - 1)] < s) isLocalMin = false;
+        if (shift < maxShift && sigScore[static_cast<size_t>(shift + 1)] < s) isLocalMin = false;
+        if (isLocalMin) {
+            candidates.push_back({shift, s});
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate &a, const Candidate &b) { return a.score1D < b.score1D; });
+
+    if (expectedShift >= 2 && expectedShift <= maxShift) {
+        candidates.push_back({expectedShift, sigScore[static_cast<size_t>(expectedShift)]});
+    }
+
+    int bestShift = 0;
+    int bestVerifiedCost = 255 * 3;
+    int bestRawError = 255 * 3;
+
+    int checked = 0;
+    for (const Candidate &cand : candidates) {
+        if (checked >= 8) break;
+        ++checked;
+
+        int overallErr = 255 * 3;
+        int texturedErr = 255 * 3;
+        int texturedRows = 0;
+        VerifyShift2D(prev, next, prevSig, nextSig, w, h, cand.shift,
+                      topStatic, botStatic, &overallErr, &texturedErr, &texturedRows);
+
+        int combinedErr = std::max(overallErr, (overallErr + texturedErr) / 2);
+        if (texturedRows > 0 && texturedErr > kLongOverlapErrorLimit + 6) {
+            continue;
+        }
+
+        // Small tie-breaking preference for consistent scroll step on repetitive patterns
+        int priorPenalty = 0;
+        if (expectedShift > 0) {
+            priorPenalty = std::min(3, std::abs(cand.shift - expectedShift) / std::max(8, h / 16));
+        }
+
+        int totalCost = combinedErr + priorPenalty;
+        if (totalCost < bestVerifiedCost) {
+            bestVerifiedCost = totalCost;
+            bestRawError = combinedErr;
+            bestShift = cand.shift;
+        }
+    }
+
+    if (outBestError) *outBestError = bestRawError;
+    if (bestShift <= 0 || bestRawError > kLongOverlapErrorLimit) {
         return 0;
     }
 
-    int minOverlap = std::min(h - 1, std::max(48, h / 6));
-    int maxOverlap = h - 1;
-    int step = std::max(1, h / 120);
-    int bestOverlap = minOverlap;
-    int bestError = 255 * 3;
-
-    // Coarse pass across valid overlap range
-    for (int overlap = minOverlap; overlap <= maxOverlap; overlap += step) {
-        int error = OverlapError(prev, next, w, h, overlap);
-        if (error < bestError) {
-            bestError = error;
-            bestOverlap = overlap;
-        }
+    // Verify that the scrolled region actually differs from a 0-shift stationary frame
+    int zeroOverall = 255 * 3, zeroTex = 255 * 3, zeroRows = 0;
+    VerifyShift2D(prev, next, prevSig, nextSig, w, h, 0,
+                  topStatic, botStatic, &zeroOverall, &zeroTex, &zeroRows);
+    if (zeroOverall <= 1 && bestRawError >= zeroOverall) {
+        return 0;
     }
 
-    // Refinement pass around best candidate
-    int refineStart = std::max(minOverlap, bestOverlap - step);
-    int refineEnd = std::min(maxOverlap, bestOverlap + step);
-    for (int overlap = refineStart; overlap <= refineEnd; ++overlap) {
-        int error = OverlapError(prev, next, w, h, overlap);
-        if (error < bestError) {
-            bestError = error;
-            bestOverlap = overlap;
-        }
+    if (outSeamRow) {
+        *outSeamRow = FindOptimalSeamRow(prev, next, prevSig, w, h,
+                                         bestShift, topStatic, botStatic, minAllowedPrevY);
+    }
+    return bestShift;
+}
+
+static bool AppendLongFrameWithSeam(LongSessionState *state, HBITMAP bitmap, int shift, int seamRowPrev) {
+    if (!state || !bitmap || state->frames.empty() || shift <= 0) return false;
+    if (state->totalH >= kLongCaptureMaxHeight ||
+        static_cast<int>(state->frames.size()) >= kLongCaptureMaxFrames) {
+        state->captureLimitReached = true;
+        return false;
     }
 
-    // Tail pass near bottom
-    int tailStart = std::max(minOverlap, h - std::max(96, h / 6));
-    for (int overlap = tailStart; overlap <= maxOverlap; ++overlap) {
-        int error = OverlapError(prev, next, w, h, overlap);
-        if (error < bestError) {
-            bestError = error;
-            bestOverlap = overlap;
-        }
+    LongFrame &prevFrame = state->frames.back();
+    int minSeam = prevFrame.srcY + 4;
+    int clampedSeam = Clamp(seamRowPrev, std::min(state->h, minSeam), state->h);
+
+    int trimmedPrevCopyH = clampedSeam - prevFrame.srcY;
+    if (trimmedPrevCopyH > 0 && trimmedPrevCopyH < prevFrame.copyH) {
+        state->totalH -= (prevFrame.copyH - trimmedPrevCopyH);
+        prevFrame.copyH = trimmedPrevCopyH;
+    } else {
+        clampedSeam = prevFrame.srcY + prevFrame.copyH;
     }
 
-    if (outError) *outError = bestError;
-    return bestError <= kLongOverlapErrorLimit ? bestOverlap : 0;
+    int newSrcY = Clamp(clampedSeam - shift, 0, state->h - 1);
+    int newCopyH = state->h - newSrcY;
+    if (state->totalH + newCopyH > kLongCaptureMaxHeight) {
+        newCopyH = kLongCaptureMaxHeight - state->totalH;
+    }
+    if (newCopyH <= 0) return false;
+
+    HBITMAP strip = CopyBitmapStrip(bitmap, state->w, newSrcY, newCopyH);
+    if (!strip) return false;
+
+    state->frames.push_back({strip, newSrcY, newCopyH});
+    state->totalH += newCopyH;
+    state->lastCopyH = shift;
+    state->skippedFrames = 0;
+    if (state->expectedScrollStep == 0) {
+        state->expectedScrollStep = shift;
+    } else {
+        state->expectedScrollStep = (state->expectedScrollStep * 2 + shift) / 3;
+    }
+    return true;
 }
 
 static bool AppendPendingLongTail(LongSessionState *state) {
-    if (!state || !state->pendingBitmap || state->pendingPixels.empty()) {
+    if (!state || !state->pendingBitmap || state->pendingPixels.empty() || state->frames.empty()) {
         return false;
     }
+
+    std::vector<RowSignature> pendingSigs;
+    ComputeRowSignatures(state->pendingPixels, state->w, state->h, &pendingSigs);
+
+    int minAllowedPrevY = state->frames.back().srcY + 8;
     int overlapError = 255 * 3;
-    int overlap = EstimateOverlap(state->prevPixels, state->pendingPixels, state->w, state->h, &overlapError);
-    if (overlap <= 0 || overlap >= state->h) {
+    int seamRow = state->h;
+    int shift = EstimateScrollShift(state->prevPixels, state->pendingPixels,
+                                    state->prevSignatures, pendingSigs,
+                                    state->w, state->h, state->expectedScrollStep,
+                                    minAllowedPrevY, &overlapError, &seamRow);
+    if (shift <= 0 || shift >= state->h) {
         return false;
     }
 
     HBITMAP bitmap = state->pendingBitmap;
     state->pendingBitmap = NULL;
-    bool appended = AppendLongFrameStrip(state, bitmap, overlap);
+    bool appended = AppendLongFrameWithSeam(state, bitmap, shift, seamRow);
     DeleteObject(bitmap);
     if (!appended) {
         state->pendingPixels.clear();
@@ -222,6 +606,7 @@ static bool AppendPendingLongTail(LongSessionState *state) {
         return false;
     }
     state->prevPixels.swap(state->pendingPixels);
+    state->prevSignatures.swap(pendingSigs);
     state->pendingPixels.clear();
     state->pendingStableFrames = 0;
     return true;
@@ -232,7 +617,8 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
     state->lastSampleUnchanged = false;
 
     if (!state->hasPrev) {
-        state->frames.push_back({bitmap, state->h});
+        ComputeRowSignatures(*pixels, state->w, state->h, &state->prevSignatures);
+        state->frames.push_back({bitmap, 0, state->h});
         state->prevPixels.swap(*pixels);
         state->totalH = state->h;
         state->lastCopyH = state->h;
@@ -247,10 +633,18 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
         return false;
     }
 
+    std::vector<RowSignature> currentSigs;
+    ComputeRowSignatures(*pixels, state->w, state->h, &currentSigs);
+
+    int minAllowedPrevY = state->frames.back().srcY + 8;
     int overlapError = 255 * 3;
-    int overlap = EstimateOverlap(state->prevPixels, *pixels, state->w, state->h, &overlapError);
-    if (overlap <= 0) {
-        if (AverageFrameDiff(state->prevPixels, *pixels, state->w, state->h) <= 1) {
+    int seamRow = state->h;
+    int shift = EstimateScrollShift(state->prevPixels, *pixels,
+                                    state->prevSignatures, currentSigs,
+                                    state->w, state->h, state->expectedScrollStep,
+                                    minAllowedPrevY, &overlapError, &seamRow);
+    if (shift <= 0) {
+        if (AverageFrameDiff(state->prevPixels, *pixels, state->w, state->h) <= 2) {
             state->lastSampleUnchanged = true;
         } else if (state->pendingBitmap && AverageFrameDiff(state->pendingPixels, *pixels, state->w, state->h) <= 2) {
             ++state->pendingStableFrames;
@@ -271,10 +665,11 @@ static bool AddLongFrame(LongSessionState *state, HBITMAP bitmap, std::vector<BY
         return false;
     }
 
-    bool appended = AppendLongFrameStrip(state, bitmap, overlap);
+    bool appended = AppendLongFrameWithSeam(state, bitmap, shift, seamRow);
     DeleteObject(bitmap);
     if (!appended) return false;
     state->prevPixels.swap(*pixels);
+    state->prevSignatures.swap(currentSigs);
     ClearPendingLongFrame(state);
     return true;
 }
@@ -305,7 +700,7 @@ static bool SampleStableLongSelection(LongSessionState *state, HWND hwnd) {
     if (!CaptureLongSelectionPixels(state, &currentBitmap, &currentPixels)) return false;
 
     for (int attempt = 0; attempt < kLongScrollSettleAttempts && IsWindow(hwnd); ++attempt) {
-        PumpMessagesFor(hwnd, kLongScrollSettleMs);
+        PumpMessagesFor(hwnd, state, kLongScrollSettleMs);
         if (state->done || state->cancelled || !IsWindow(hwnd)) {
             DeleteObject(currentBitmap);
             return false;
@@ -350,6 +745,7 @@ static HBITMAP StitchLongFrames(const std::vector<LongFrame> &frames, int w, int
     HGDIOBJ oldDest = SelectObject(dest, output);
     int y = 0;
     for (const LongFrame &frame : frames) {
+        if (frame.copyH <= 0) continue;
         HGDIOBJ oldSource = SelectObject(source, frame.bitmap);
         BitBlt(dest, 0, y, w, frame.copyH, source, 0, 0, SRCCOPY);
         SelectObject(source, oldSource);
@@ -435,6 +831,7 @@ static void DrawLongPreview(LongSessionState *state, HDC dc, const RECT &preview
 
     int scaledY = 0;
     for (const LongFrame &frame : state->frames) {
+        if (frame.copyH <= 0) continue;
         int frameScaledH = std::max(1, frame.copyH * drawW / state->w);
         int destTop = content.top + scaledY - visibleTop;
         int destBottom = destTop + frameScaledH;
@@ -491,18 +888,22 @@ static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
         DrawTextLabel(dc, L"Preparing automatic scroll capture...", 14, 34, RGB(148, 163, 184));
     } else if (state->captureLimitReached) {
         DrawTextLabel(dc, L"Finished or limit reached. Opening editor.", 14, 34, RGB(245, 158, 11));
+    } else if (state->pausedByHover) {
+        DrawTextLabel(dc, L"Paused  •  Click Stop (Enter) or Cancel (Esc)", 14, 34, RGB(56, 189, 248));
     } else if (state->skippedFrames > 0) {
-        DrawTextLabel(dc, L"Waiting for stable overlap...", 14, 34, RGB(245, 158, 11));
+        DrawTextLabel(dc, L"Aligning seam overlap...", 14, 34, RGB(245, 158, 11));
     } else if (!state->statusText.empty()) {
         DrawTextLabel(dc, state->statusText, 14, 34, RGB(148, 163, 184));
     } else {
         wchar_t hint[128];
-        wsprintfW(hint, L"Auto scrolling. Last +%d px", state->lastCopyH);
+        wsprintfW(hint, L"Auto scrolling  •  +%d px", state->lastCopyH);
         DrawTextLabel(dc, hint, 14, 34, RGB(148, 163, 184));
     }
 
     RECT preview = {14, 62, 346, 458};
     DrawLongPreview(state, dc, preview);
+
+    DrawTextLabel(dc, L"Enter: Finish   Esc: Cancel", 14, 478, RGB(100, 116, 139));
 
     RECT done = LongDoneRect();
     RECT cancel = LongCancelRect();
@@ -512,13 +913,15 @@ static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
         GraphicsPath donePath;
         BuildRoundedRectPath(&donePath, static_cast<float>(done.left), static_cast<float>(done.top),
                              static_cast<float>(RectWidth(done)), static_cast<float>(RectHeight(done)), 8.0f);
-        SolidBrush doneFill(Color(255, 99, 102, 241));
+        Color doneColor = (state->hoveredButton == 1) ? Color(255, 129, 140, 248) : Color(255, 99, 102, 241);
+        SolidBrush doneFill(doneColor);
         graphics.FillPath(&doneFill, &donePath);
 
         GraphicsPath cancelPath;
         BuildRoundedRectPath(&cancelPath, static_cast<float>(cancel.left), static_cast<float>(cancel.top),
                              static_cast<float>(RectWidth(cancel)), static_cast<float>(RectHeight(cancel)), 8.0f);
-        SolidBrush cancelFill(Color(255, 30, 35, 48));
+        Color cancelColor = (state->hoveredButton == 2) ? Color(255, 45, 53, 72) : Color(255, 30, 35, 48);
+        SolidBrush cancelFill(cancelColor);
         Pen cancelBorder(Color(180, 56, 64, 82), 1.0f);
         graphics.FillPath(&cancelFill, &cancelPath);
         graphics.DrawPath(&cancelBorder, &cancelPath);
@@ -562,12 +965,26 @@ LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         CREATESTRUCTW *create = reinterpret_cast<CREATESTRUCTW *>(lParam);
         state = reinterpret_cast<LongSessionState *>(create->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        ExcludeWindowFromCapture(hwnd);
         return 0;
     }
     case WM_ERASEBKGND:
         return 1;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
+    case WM_MOUSEMOVE:
+        if (state) {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            int hovered = 0;
+            if (PointInRect(x, y, LongDoneRect())) hovered = 1;
+            else if (PointInRect(x, y, LongCancelRect())) hovered = 2;
+            if (hovered != state->hoveredButton) {
+                state->hoveredButton = hovered;
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+        }
+        return 0;
     case WM_COMMAND:
         if (LOWORD(wParam) == kLongSessionDone && state) {
             state->done = true;
@@ -666,6 +1083,7 @@ HBITMAP RunLongSession(HINSTANCE instance, const RECT &selection, HWND preferred
         return NULL;
     }
 
+    ExcludeWindowFromCapture(hwnd);
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     UpdateWindow(hwnd);
     FocusLongTarget(&state);
@@ -674,7 +1092,7 @@ HBITMAP RunLongSession(HINSTANCE instance, const RECT &selection, HWND preferred
     state.started = true;
     state.statusText = L"Auto scrolling...";
     InvalidateRect(hwnd, NULL, FALSE);
-    PumpMessagesFor(hwnd, 120);
+    PumpMessagesFor(hwnd, &state, 120);
 
     while (!state.done && !state.cancelled && IsWindow(hwnd)) {
         if (state.totalH >= kLongCaptureMaxHeight ||
@@ -685,35 +1103,51 @@ HBITMAP RunLongSession(HINSTANCE instance, const RECT &selection, HWND preferred
             break;
         }
 
-        if (!SendLongScrollStep(&state)) {
+        // Pause auto-scrolling while user hovers over the control window so buttons are easy to click
+        if (IsCursorOverControlWindow(hwnd)) {
+            if (!state.pausedByHover) {
+                state.pausedByHover = true;
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            PumpMessagesFor(hwnd, &state, 60);
+            continue;
+        } else if (state.pausedByHover) {
+            state.pausedByHover = false;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+
+        bool useFallback = (state.unchangedSteps >= 2);
+        if (!SendLongScrollStep(&state, useFallback)) {
             state.statusText = L"Target did not accept scrolling.";
             InvalidateRect(hwnd, NULL, FALSE);
-            PumpMessagesFor(hwnd, 400);
+            PumpMessagesFor(hwnd, &state, 400);
             break;
         }
 
-        PumpMessagesFor(hwnd, kLongScrollWaitMs);
+        PumpMessagesFor(hwnd, &state, kLongScrollWaitMs);
         if (state.done || state.cancelled || !IsWindow(hwnd)) break;
 
         bool added = SampleStableLongSelection(&state, hwnd);
         if (added) {
             state.unchangedSteps = 0;
-            state.statusText = L"Auto scrolling...";
+            wchar_t msg[96];
+            wsprintfW(msg, L"Auto scrolling  •  +%d px", state.lastCopyH);
+            state.statusText = msg;
             InvalidateRect(hwnd, NULL, FALSE);
         } else if (!state.lastSampleUnchanged) {
             state.unchangedSteps = 0;
             state.statusText = state.pendingStableFrames >= 2 ? L"At bottom or content changed. Verifying..." :
-                                                                 L"Waiting for stable overlap...";
+                                                                 L"Aligning seam overlap...";
             InvalidateRect(hwnd, NULL, FALSE);
         } else {
             ++state.unchangedSteps;
             state.statusText = L"Checking for page bottom...";
             InvalidateRect(hwnd, NULL, FALSE);
             if (state.unchangedSteps >= 3) {
-                PumpMessagesFor(hwnd, kLongScrollWaitMs * 2);
+                PumpMessagesFor(hwnd, &state, kLongScrollWaitMs * 2);
                 if (state.done || state.cancelled || !IsWindow(hwnd)) break;
-                SendLongScrollStep(&state);
-                PumpMessagesFor(hwnd, kLongScrollWaitMs);
+                SendLongScrollStep(&state, true);
+                PumpMessagesFor(hwnd, &state, kLongScrollWaitMs);
                 if (state.done || state.cancelled || !IsWindow(hwnd)) break;
 
                 if (SampleStableLongSelection(&state, hwnd)) {
@@ -724,13 +1158,7 @@ HBITMAP RunLongSession(HINSTANCE instance, const RECT &selection, HWND preferred
                 }
                 if (!state.lastSampleUnchanged) {
                     state.unchangedSteps = 0;
-                    state.statusText = L"Waiting for stable overlap...";
-                    InvalidateRect(hwnd, NULL, FALSE);
-                    continue;
-                }
-                if (state.pendingStableFrames >= 2 && AppendPendingLongTail(&state)) {
-                    state.unchangedSteps = 0;
-                    state.statusText = L"Added final tail.";
+                    state.statusText = L"Aligning seam overlap...";
                     InvalidateRect(hwnd, NULL, FALSE);
                     continue;
                 }
@@ -743,7 +1171,7 @@ HBITMAP RunLongSession(HINSTANCE instance, const RECT &selection, HWND preferred
                 state.captureLimitReached = true;
                 state.statusText = L"Bottom reached.";
                 InvalidateRect(hwnd, NULL, FALSE);
-                PumpMessagesFor(hwnd, 350);
+                PumpMessagesFor(hwnd, &state, 350);
                 break;
             }
         }

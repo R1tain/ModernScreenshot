@@ -148,6 +148,7 @@ struct ScreenCapture {
 
 struct LongFrame {
     HBITMAP bitmap = NULL;
+    int srcY = 0;
     int copyH = 0;
 };
 
