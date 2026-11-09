@@ -1,148 +1,98 @@
 # ModernScreenshot
 
-ModernScreenshot is a lightweight screenshot daemon with a custom-drawn selection UI, a PixPin/Snip-style edit toolbar, and the global hotkey `Ctrl+1`.
+ModernScreenshot is an ultra-lightweight, high-performance Windows screenshot tool built with modern C++17 and Win32 / GDI / GDI+. It features a custom-drawn selection overlay, a PixPin / Snip-style vector edit toolbar, automated scrollable long screenshots, and a global hotkey (`Ctrl+1`).
 
-The implementation is intentionally small:
+The implementation is intentionally small and zero-dependency:
 
-- Linux: C11, Xlib, and Xrender only
-- Windows: Win32/GDI/GDI+ only
-- no Electron, Qt, GTK, libpng, zlib, or tray runtime
-- idle RSS target below 5 MB
-- screenshot capture uses a fixed tile buffer instead of storing a full-screen image in memory
-- annotations are stored as vector operations until export
-- PNG output is written as valid uncompressed PNG data to keep memory predictable
+- **Windows Native**: Win32 / GDI / GDI+ only
+- **Zero Bloat**: No Electron, Qt, GTK, or external runtime dependencies
+- **Low Footprint**: Idle memory footprint under 5 MB RSS
+- **Vector Annotations**: Stored as crisp vector operations until export
+- **Standalone Portable**: Single executable binary with embedded High-DPI manifest
 
 ## Features
 
-- `Ctrl+1` global hotkey
-- Windows tray icon with Capture, Long Capture, Settings, and Exit
-- configurable Windows hotkey stored in `%APPDATA%\ModernScreenshot\settings.ini`
-- Windows setting to enable or disable start with Windows
-- hotkey conflict warning with a settings entry point
-- region selection overlay
-- Windows long screenshot mode for scrollable content
-- editor toolbar: blur, arrow, rectangle, text, undo, copy, save
-- mosaic blur for sensitive content
-- `Ctrl+Z`, `Ctrl+C`, and `Ctrl+S` in the editor
-- clipboard ownership with `image/png`, text path, and URI list targets
+- **Global Hotkey**: Default `Ctrl+1`, configurable to any key or modifier combination
+- **System Tray**: Custom-drawn dark popup menu with Capture, Long Capture, Settings, and Exit
+- **Region Selection Overlay**: Fullscreen dark mask with pixel dimension badge and mode toggle
+- **Long Screenshot Mode**: Automatic window scrolling, settle delay, seam template matching, and seamless stitching
+- **PixPin-Style Vector Editor**:
+  - `Blur` / Mosaic for sensitive information
+  - `Arrow` with smooth antialiased arrowheads
+  - `Box` (Rectangle outline)
+  - `Text` with inline editing
+  - `Undo` (`Ctrl+Z`)
+  - `Copy` (`Ctrl+C`) writes directly to clipboard (`CF_BITMAP` and DIB)
+  - `Save` (`Ctrl+S`) saves to `%USERPROFILE%\Pictures\Screenshots\`
+  - Drag the empty toolbar area to reposition the editor
+  - Mouse wheel, `PageUp`, `PageDown`, `Home`, and `End` navigation for tall/long screenshots
+- **Settings & Autostart**:
+  - Custom dark settings window
+  - Interactive hotkey recorder
+  - Hotkey conflict warning
+  - Toggle "Start with Windows" via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  - Persisted in `%APPDATA%\ModernScreenshot\settings.ini`
+- **Single Instance**: Wakes existing instance on duplicate launch
 
 ## Build
 
-Linux:
-
-```sh
-sudo apt-get install build-essential pkg-config libx11-dev libxrender-dev
-make release
-```
-
-The binary is written to `build/modern-screenshot`.
-
-Windows:
+Requires MSVC (`cl.exe`) with C++17 support:
 
 ```powershell
 .\scripts\build-windows.ps1 -Configuration Release
 ```
 
-The executable is written to `build\windows\ModernScreenshot.exe`, and the zip package is written to `build\windows\ModernScreenshot-windows-x64.zip`.
+The executable is compiled to `build\windows\ModernScreenshot.exe`, and the distribution package is generated at `build\windows\ModernScreenshot-windows-x64.zip`.
 
-Release builds are published by GitHub Actions to GitHub Releases. Download `ModernScreenshot-windows-x64.zip` from the latest release for Windows.
+GitHub Actions automatically builds, smoke-tests, and publishes release packages on every push to `master`.
 
 ## Run
-
-Linux:
-
-```sh
-./build/modern-screenshot
-```
-
-Windows:
 
 ```powershell
 .\build\windows\ModernScreenshot.exe
 ```
 
-On Windows, the app stays in the system tray. Use the tray menu to capture, long capture, open settings, or exit. If `Ctrl+1` is already used by another app, open Settings from the tray menu and choose another hotkey. Settings also has a `Start with Windows` checkbox for the current user.
+When started, ModernScreenshot minimizes to the system notification area (system tray). Press the configured hotkey (default `Ctrl+1`), drag a region, and release to begin editing.
 
-Press the configured hotkey, drag a region, and release the mouse. The editor opens on the captured region:
+### Command Line Options
 
-- `Blur`, `->`, `Box`, and `Text` choose the active tool
-- `Undo` removes the last annotation
-- `Copy` writes the image to the clipboard
-- `Save` writes a PNG file to:
-- drag the empty toolbar area to move the editor window
-- use the mouse wheel, `PageUp`, `PageDown`, `Home`, or `End` to browse tall screenshots
+- One-shot capture:
+  ```powershell
+  .\build\windows\ModernScreenshot.exe --once
+  ```
 
-```text
-~/Pictures/Screenshots/
-```
+- Start long screenshot directly:
+  ```powershell
+  .\build\windows\ModernScreenshot.exe --long
+  ```
 
-On Windows, saved files go to:
+- Check version:
+  ```powershell
+  .\build\windows\ModernScreenshot.exe --version
+  ```
 
-```text
-%USERPROFILE%\Pictures\Screenshots\
-```
+- Automated export self-test (used in CI):
+  ```powershell
+  .\build\windows\ModernScreenshot.exe --self-test output.png
+  ```
 
-For a one-shot capture:
+## Architecture
 
-```sh
-./build/modern-screenshot --once
-```
+The project is structured into clean, decoupled C++17 modules:
 
-For a Windows long screenshot, press the capture hotkey and click `Long` in the selection overlay, choose `Long Capture...` from the tray menu, or run:
+- `src/common.h`: Shared constants, enumerations, geometry helpers, and state structures
+- `src/raii.h`: Zero-cost RAII resource guards for Win32 GDI handles (`ScopedDC`, `ScopedGdiObject`, `ScopedSelectObject`)
+- `src/utils.h` / `src/utils.cpp`: Configuration, registry startup, screenshot path, and clipboard handlers
+- `src/graphics.h` / `src/graphics.cpp`: Screen capture, GDI+ PNG export, mosaic pixelation, and vector drawing
+- `src/overlay.h` / `src/overlay.cpp`: Fullscreen selection overlay and mode pill controls
+- `src/long_capture.h` / `src/long_capture.cpp`: Long screenshot scrolling, frame correlation, and template stitching engine
+- `src/editor.h` / `src/editor.cpp`: Floating PixPin-style editor window, annotation rendering, and undo stack
+- `src/tray_popup.h` / `src/tray_popup.cpp`: Custom-drawn dark popup menu for the system tray
+- `src/settings.h` / `src/settings.cpp`: Custom-drawn dark settings dialog and hotkey capture
+- `src/app.h` / `src/app.cpp`: Application lifecycle, single-instance management, and daemon message loop
+- `src/main.cpp`: Entry point (`wWinMain`) and CLI argument dispatch
+- `src/modern_screenshot.manifest`: Per-Monitor V2 High-DPI and Common Controls v6 manifest
 
-```powershell
-.\build\windows\ModernScreenshot.exe --long
-```
+## License
 
-Drag the visible scrollable content area. ModernScreenshot then scrolls the target window in small steps, waits for the content to settle, captures each step, and opens the stitched image in the editor when it reaches the bottom. The floating controller shows progress and has `Stop` if you want to finish early. Long capture works best when you select only the scrolling content area and avoid including fixed headers or scrollbars.
-
-For an automated editor export test:
-
-```sh
-xvfb-run -a ./build/modern-screenshot --self-test /tmp/modern-screenshot-test.png
-```
-
-## Install For Current User
-
-```sh
-make PREFIX="$HOME/.local" install
-systemctl --user daemon-reload
-systemctl --user enable --now modern-screenshot.service
-```
-
-## Memory Check
-
-Run this inside an X11 session:
-
-```sh
-make memory-check
-```
-
-The check fails if idle RSS is above `5120 KB`. You can override the threshold:
-
-```sh
-MODERN_SCREENSHOT_RSS_LIMIT_KB=5120 make memory-check
-```
-
-## Publish A Release
-
-Push code to `master`:
-
-```sh
-git push origin master
-```
-
-The `release` workflow automatically increments the latest `vMAJOR.MINOR.PATCH` tag by one patch version, builds Linux and Windows packages, creates a GitHub Release, and uploads:
-
-- `ModernScreenshot-linux-x64.tar.gz`
-- `ModernScreenshot-windows-x64.zip`
-
-You can still run the `release` workflow manually from the Actions tab. Leave the tag empty for automatic patch increment, or provide a tag such as `v1.0.0`.
-
-## Notes
-
-This tool targets X11. On Wayland sessions, global hotkeys and root-window capture are intentionally restricted by the compositor, so use an X11 session or XWayland environment that exposes the root window.
-
-The 5 MB target applies to the idle daemon. During copy, export, or long screenshot stitching, the app may temporarily allocate memory proportional to the captured image size.
-
-Useful next features would be numbered step markers, adjustable stroke width, color swatches, pinned screenshots, and a delayed full-screen capture mode.
+MIT License. See [LICENSE](LICENSE) for details.

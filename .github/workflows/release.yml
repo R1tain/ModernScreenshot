@@ -62,35 +62,6 @@ jobs:
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
-  linux:
-    runs-on: ubuntu-latest
-    needs: metadata
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libx11-dev libxrender-dev xvfb
-      - name: Build
-        run: make release VERSION="${{ needs.metadata.outputs.version }}"
-      - name: Smoke test
-        run: make smoke
-      - name: Editor export test
-        run: xvfb-run -a ./build/modern-screenshot --self-test /tmp/modern-screenshot-editor-test.png
-      - name: Memory check
-        run: xvfb-run -a make memory-check
-      - name: Package Linux tarball
-        shell: bash
-        run: |
-          package="ModernScreenshot-linux-x64"
-          mkdir -p "dist/$package"
-          cp build/modern-screenshot "dist/$package/"
-          cp README.md LICENSE "dist/$package/"
-          tar -C dist -czf "dist/$package.tar.gz" "$package"
-      - name: Upload Linux package
-        uses: actions/upload-artifact@v4
-        with:
-          name: ModernScreenshot-linux-x64
-          path: dist/ModernScreenshot-linux-x64.tar.gz
-
   windows:
     runs-on: windows-latest
     needs: metadata
@@ -119,7 +90,6 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - metadata
-      - linux
       - windows
     steps:
       - uses: actions/checkout@v4
@@ -135,14 +105,14 @@ jobs:
           TARGET: ${{ github.sha }}
         shell: bash
         run: |
-          mapfile -t assets < <(find dist -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort)
+          mapfile -t assets < <(find dist -type f -name "*.zip" | sort)
           if [[ "${#assets[@]}" -eq 0 ]]; then
             echo "No release assets found" >&2
             exit 1
           fi
 
           {
-            echo "ModernScreenshot $TAG"
+            echo "ModernScreenshot $TAG (Windows x64)"
             echo
             echo "Assets:"
             for asset in "${assets[@]}"; do

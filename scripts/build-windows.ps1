@@ -9,7 +9,6 @@ $Root = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $Root "build\windows"
 $PackageDir = Join-Path $BuildDir "package"
 $Exe = Join-Path $BuildDir "ModernScreenshot.exe"
-$Source = Join-Path $Root "src\modern_screenshot_win.cpp"
 $Manifest = Join-Path $Root "src\modern_screenshot.manifest"
 $Zip = Join-Path $BuildDir "ModernScreenshot-windows-x64.zip"
 
@@ -20,6 +19,11 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
     throw "cl.exe was not found. Run this from a Visual Studio Developer PowerShell, or use the GitHub Actions workflow."
 }
 
+$Sources = Get-ChildItem (Join-Path $Root "src") -Filter "*.cpp" | ForEach-Object { $_.FullName }
+if ($Sources.Count -eq 0) {
+    throw "No .cpp source files found in src directory."
+}
+
 $CommonArgs = @(
     "/nologo",
     "/std:c++17",
@@ -28,8 +32,8 @@ $CommonArgs = @(
     "/DUNICODE",
     "/D_UNICODE",
     "/DVERSION=`"$Version`"",
-    "/Fe:$Exe",
-    $Source,
+    "/Fe:$Exe"
+) + $Sources + @(
     "/link",
     "/SUBSYSTEM:WINDOWS",
     "/MANIFEST:EMBED",
