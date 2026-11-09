@@ -124,11 +124,6 @@ enum SettingsHit {
     SettingsHitCancel,
 };
 
-enum BannerType {
-    BannerInfo,
-    BannerWarn,
-    BannerError,
-};
 
 struct ButtonSpec {
     Action action;
