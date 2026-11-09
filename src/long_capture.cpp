@@ -448,46 +448,46 @@ static void DrawLongPreview(LongSessionState *state, HDC dc, const RECT &preview
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        Pen border(Color(210, 82, 98, 100), 1.0f);
+        Pen border(Color(180, 40, 46, 60), 1.0f);
         graphics.DrawRectangle(&border, preview.left, preview.top, RectWidth(preview) - 1, RectHeight(preview) - 1);
-        SolidBrush fade(Color(150, 7, 11, 14));
+        SolidBrush fade(Color(220, 13, 15, 20));
         graphics.FillRectangle(&fade, preview.left + 1, preview.top + 1, RectWidth(preview) - 2, 26);
     }
 
     wchar_t label[96];
-    wsprintfW(label, L"Live preview  %d x %d", state->w, state->totalH);
-    DrawTextLabel(dc, label, preview.left + 12, preview.top + 7, RGB(245, 251, 248));
+    wsprintfW(label, L"Live preview  •  %d × %d", state->w, state->totalH);
+    DrawTextLabel(dc, label, preview.left + 12, preview.top + 7, RGB(248, 250, 252));
 }
 
 static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
     RECT rect;
     GetClientRect(hwnd, &rect);
-    FillRectColor(dc, rect, RGB(16, 21, 24));
+    FillRectColor(dc, rect, RGB(13, 15, 18));
 
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        SolidBrush panel(Color(245, 16, 21, 24));
+        SolidBrush panel(Color(250, 13, 15, 18));
         graphics.FillRectangle(&panel, 0, 0, RectWidth(rect), RectHeight(rect));
-        Pen border(Color(160, 23, 198, 163), 1.2f);
+        Pen border(Color(220, 99, 102, 241), 1.2f);
         graphics.DrawRectangle(&border, 0, 0, RectWidth(rect) - 1, RectHeight(rect) - 1);
     }
 
     wchar_t status[128];
-    wsprintfW(status, L"Long capture  %d frames  %d px", static_cast<int>(state->frames.size()), state->totalH);
-    DrawTextLabel(dc, status, 14, 12, RGB(245, 251, 248));
+    wsprintfW(status, L"Long capture  •  %d frames  •  %d px", static_cast<int>(state->frames.size()), state->totalH);
+    DrawTextLabel(dc, status, 14, 12, RGB(248, 250, 252));
     if (!state->started) {
-        DrawTextLabel(dc, L"Preparing automatic scroll capture...", 14, 34, RGB(188, 202, 200));
+        DrawTextLabel(dc, L"Preparing automatic scroll capture...", 14, 34, RGB(148, 163, 184));
     } else if (state->captureLimitReached) {
-        DrawTextLabel(dc, L"Finished or limit reached. Opening editor.", 14, 34, RGB(255, 207, 90));
+        DrawTextLabel(dc, L"Finished or limit reached. Opening editor.", 14, 34, RGB(245, 158, 11));
     } else if (state->skippedFrames > 0) {
-        DrawTextLabel(dc, L"Waiting for stable overlap...", 14, 34, RGB(255, 207, 90));
+        DrawTextLabel(dc, L"Waiting for stable overlap...", 14, 34, RGB(245, 158, 11));
     } else if (!state->statusText.empty()) {
-        DrawTextLabel(dc, state->statusText, 14, 34, RGB(188, 202, 200));
+        DrawTextLabel(dc, state->statusText, 14, 34, RGB(148, 163, 184));
     } else {
         wchar_t hint[128];
         wsprintfW(hint, L"Auto scrolling. Last +%d px", state->lastCopyH);
-        DrawTextLabel(dc, hint, 14, 34, RGB(188, 202, 200));
+        DrawTextLabel(dc, hint, 14, 34, RGB(148, 163, 184));
     }
 
     RECT preview = {14, 62, 346, 458};
@@ -500,20 +500,23 @@ static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
         GraphicsPath donePath;
         BuildRoundedRectPath(&donePath, static_cast<float>(done.left), static_cast<float>(done.top),
-                             static_cast<float>(RectWidth(done)), static_cast<float>(RectHeight(done)), 9.0f);
-        SolidBrush doneFill(Color(255, 23, 198, 163));
+                             static_cast<float>(RectWidth(done)), static_cast<float>(RectHeight(done)), 8.0f);
+        SolidBrush doneFill(Color(255, 99, 102, 241));
         graphics.FillPath(&doneFill, &donePath);
+
         GraphicsPath cancelPath;
         BuildRoundedRectPath(&cancelPath, static_cast<float>(cancel.left), static_cast<float>(cancel.top),
-                             static_cast<float>(RectWidth(cancel)), static_cast<float>(RectHeight(cancel)), 9.0f);
-        SolidBrush cancelFill(Color(255, 36, 45, 48));
+                             static_cast<float>(RectWidth(cancel)), static_cast<float>(RectHeight(cancel)), 8.0f);
+        SolidBrush cancelFill(Color(255, 30, 35, 48));
+        Pen cancelBorder(Color(180, 56, 64, 82), 1.0f);
         graphics.FillPath(&cancelFill, &cancelPath);
+        graphics.DrawPath(&cancelBorder, &cancelPath);
     } else {
-        FillRectColor(dc, done, RGB(23, 198, 163));
-        FillRectColor(dc, cancel, RGB(36, 45, 48));
+        FillRectColor(dc, done, RGB(99, 102, 241));
+        FillRectColor(dc, cancel, RGB(30, 35, 48));
     }
-    DrawCenteredText(dc, L"Stop", done, -14, FW_SEMIBOLD, RGB(7, 11, 14));
-    DrawCenteredText(dc, L"Cancel", cancel, -14, FW_SEMIBOLD, RGB(245, 251, 248));
+    DrawCenteredText(dc, L"Stop", done, -14, FW_SEMIBOLD, RGB(255, 255, 255));
+    DrawCenteredText(dc, L"Cancel", cancel, -14, FW_SEMIBOLD, RGB(226, 232, 240));
 }
 
 static void PaintLongSessionBuffered(HWND hwnd, LongSessionState *state, HDC dc, const RECT &paint) {

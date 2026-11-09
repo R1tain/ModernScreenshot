@@ -30,10 +30,10 @@ static HICON CreateTrayIcon() {
     HGDIOBJ old = SelectObject(dc, color);
 
     RECT bg = {0, 0, 32, 32};
-    FillRectColor(dc, bg, RGB(16, 20, 24));
-    HBRUSH accent = CreateSolidBrush(RGB(23, 198, 163));
+    FillRectColor(dc, bg, RGB(13, 15, 18));
+    HBRUSH accent = CreateSolidBrush(RGB(99, 102, 241));
     HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(dc, accent));
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(245, 251, 248));
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(248, 250, 252));
     HGDIOBJ oldPen = SelectObject(dc, pen);
     RoundRect(dc, 5, 6, 27, 24, 7, 7);
     MoveToEx(dc, 11, 15, NULL);

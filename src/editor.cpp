@@ -50,17 +50,17 @@ static bool ScrollEditor(EditorState *state, HWND hwnd, int delta) {
 
 static void DrawToolbar(EditorState *state, HDC dc) {
     RECT toolbar = {0, 0, state->winW, kToolbarH};
-    FillRectColor(dc, toolbar, RGB(12, 16, 18));
+    FillRectColor(dc, toolbar, RGB(13, 15, 18));
 
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        SolidBrush panel(Color(245, 18, 24, 27));
+        SolidBrush panel(Color(248, 15, 17, 23));
         graphics.FillRectangle(&panel, 0, 0, state->winW, kToolbarH);
-        Pen line(Color(120, 80, 96, 98), 1.0f);
+        Pen line(Color(180, 36, 42, 54), 1.0f);
         graphics.DrawLine(&line, 0, kToolbarH - 1, state->winW, kToolbarH - 1);
     } else {
-        HPEN border = CreatePen(PS_SOLID, 1, RGB(58, 74, 80));
+        HPEN border = CreatePen(PS_SOLID, 1, RGB(36, 42, 54));
         HGDIOBJ oldPen = SelectObject(dc, border);
         MoveToEx(dc, 0, kToolbarH - 1, NULL);
         LineTo(dc, state->winW, kToolbarH - 1);
@@ -82,17 +82,17 @@ static void DrawToolbar(EditorState *state, HDC dc) {
             BuildRoundedRectPath(&path, static_cast<float>(button.left), static_cast<float>(button.top),
                                  static_cast<float>(RectWidth(button)),
                                  static_cast<float>(RectHeight(button)), 8.0f);
-            Color fillColor = active ? (hover ? Color(255, 34, 60, 64) : Color(255, 28, 48, 52))
-                                     : (hover ? Color(255, 30, 40, 46) : Color(255, 21, 28, 31));
-            Color outlineColor = active ? Color(255, 23, 198, 163)
-                                        : (hover ? Color(255, 138, 168, 170) : Color(120, 82, 98, 100));
+            Color fillColor = active ? (hover ? Color(255, 52, 56, 88) : Color(255, 42, 45, 74))
+                                     : (hover ? Color(255, 30, 35, 48) : Color(255, 20, 23, 31));
+            Color outlineColor = active ? Color(255, 129, 140, 248)
+                                        : (hover ? Color(255, 72, 84, 108) : Color(100, 38, 44, 58));
             SolidBrush fill(fillColor);
-            Pen outline(outlineColor, active ? 1.6f : 1.0f);
+            Pen outline(outlineColor, active ? 1.4f : 1.0f);
             graphics.FillPath(&fill, &path);
             graphics.DrawPath(&outline, &path);
         } else {
-            FillRectColor(dc, button, active ? RGB(33, 49, 56) : (hover ? RGB(28, 38, 44) : RGB(22, 29, 34)));
-            HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(23, 198, 163) : RGB(58, 74, 80));
+            FillRectColor(dc, button, active ? RGB(42, 45, 74) : (hover ? RGB(30, 35, 48) : RGB(20, 23, 31)));
+            HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(129, 140, 248) : RGB(38, 44, 58));
             HGDIOBJ old = SelectObject(dc, pen);
             HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
             Rectangle(dc, button.left, button.top, button.right, button.bottom);
@@ -103,8 +103,8 @@ static void DrawToolbar(EditorState *state, HDC dc) {
 
         DrawToolbarIcon(dc, kButtons[i].action, button, active);
         RECT labelRect = {button.left, button.bottom - 15, button.right, button.bottom - 2};
-        COLORREF labelColor = active ? RGB(23, 198, 163)
-                                     : (hover ? RGB(220, 232, 232) : RGB(176, 192, 192));
+        COLORREF labelColor = active ? RGB(129, 140, 248)
+                                     : (hover ? RGB(248, 250, 252) : RGB(148, 163, 184));
         DrawCenteredText(dc, kButtons[i].label, labelRect, -10, FW_MEDIUM, labelColor);
 
         if (i + 1 == separatorAfter && separatorAfter < ButtonCount()) {
@@ -113,10 +113,10 @@ static void DrawToolbar(EditorState *state, HDC dc) {
             if (StartGdiplus()) {
                 Graphics graphics(dc);
                 graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-                Pen sep(Color(180, 78, 96, 100), 1.0f);
+                Pen sep(Color(180, 42, 48, 62), 1.0f);
                 graphics.DrawLine(&sep, sepX, button.top + 6, sepX, button.bottom - 6);
             } else {
-                HPEN sep = CreatePen(PS_SOLID, 1, RGB(78, 96, 100));
+                HPEN sep = CreatePen(PS_SOLID, 1, RGB(42, 48, 62));
                 HGDIOBJ oldSep = SelectObject(dc, sep);
                 MoveToEx(dc, sepX, button.top + 6, NULL);
                 LineTo(dc, sepX, button.bottom - 6);
@@ -127,7 +127,7 @@ static void DrawToolbar(EditorState *state, HDC dc) {
     }
 
     if (!state->statusText.empty() && state->winW > ToolbarWidth() + 120) {
-        DrawTextLabel(dc, state->statusText, ToolbarWidth() + 16, 22, RGB(188, 202, 200));
+        DrawTextLabel(dc, state->statusText, ToolbarWidth() + 16, 22, RGB(148, 163, 184));
     }
 }
 
@@ -183,7 +183,7 @@ bool CopyEditor(EditorState *state, HWND hwnd) {
 
 static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
     RECT bg = {0, 0, state->winW, state->winH};
-    FillRectColor(dc, bg, RGB(12, 16, 18));
+    FillRectColor(dc, bg, RGB(9, 10, 14));
 
     HDC source = CreateCompatibleDC(dc);
     HGDIOBJ old = SelectObject(source, state->shot);
@@ -193,7 +193,7 @@ static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
     DeleteDC(source);
 
     RECT imageBorder = {state->imageX, state->imageY, state->imageX + state->w, state->imageY + state->viewH};
-    HPEN border = CreatePen(PS_SOLID, 1, RGB(58, 74, 80));
+    HPEN border = CreatePen(PS_SOLID, 1, RGB(38, 44, 58));
     HGDIOBJ oldPen = SelectObject(dc, border);
     HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
     Rectangle(dc, imageBorder.left, imageBorder.top, imageBorder.right, imageBorder.bottom);
@@ -231,8 +231,8 @@ static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
         if (state->h > state->viewH) {
             thumbY += maxThumbTravel * static_cast<float>(state->scrollY) / static_cast<float>(state->h - state->viewH);
         }
-        SolidBrush track(Color(110, 8, 12, 14));
-        SolidBrush thumb(Color(210, 23, 198, 163));
+        SolidBrush track(Color(60, 13, 15, 20));
+        SolidBrush thumb(Color(220, 99, 102, 241));
         graphics.FillRectangle(&track, static_cast<float>(trackX), static_cast<float>(trackTop), 4.0f, static_cast<float>(trackH));
         graphics.FillRectangle(&thumb, static_cast<float>(trackX - 1), thumbY, 6.0f, thumbH);
     }

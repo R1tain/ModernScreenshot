@@ -1,6 +1,6 @@
 # ModernScreenshot
 
-ModernScreenshot is an ultra-lightweight, high-performance Windows screenshot tool built with modern C++17 and Win32 / GDI / GDI+. It features a custom-drawn selection overlay, a PixPin / Snip-style vector edit toolbar, automated scrollable long screenshots, and a global hotkey (`Ctrl+1`).
+ModernScreenshot is an ultra-lightweight, high-performance Windows screenshot tool built with modern C++17 and Win32 / GDI / GDI+. Designed with a sleek **Raycast / Linear dark aesthetic** (Obsidian palette, hairline borders, and Electric Indigo accents), it features a custom-drawn selection overlay with circular dot handles, floating dimension HUD, a vector edit toolbar, automated scrollable long screenshots, and a global hotkey (`Ctrl+1`).
 
 The implementation is intentionally small and zero-dependency:
 

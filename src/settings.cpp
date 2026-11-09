@@ -52,19 +52,30 @@ static SettingsHit SettingsHitTest(int x, int y) {
 
 static void DrawSettingsTitle(Graphics *graphics) {
     Font font(L"Segoe UI", 18.0f, FontStyleBold, UnitPixel);
-    SolidBrush brush(Color(255, 245, 251, 248));
+    SolidBrush brush(Color(255, 248, 250, 252));
     graphics->DrawString(L"Settings", -1, &font, PointF(kSettingsPadX, 28), &brush);
 
-    Font sub(L"Segoe UI", 11.0f, FontStyleRegular, UnitPixel);
-    SolidBrush subBrush(Color(220, 138, 156, 158));
-    std::wstring version = L"ModernScreenshot ";
+    // Modern version pill badge
+    std::wstring version = L"v";
     version += kVersion;
-    graphics->DrawString(version.c_str(), -1, &sub, PointF(kSettingsPadX, 56), &subBrush);
+    Font sub(L"Segoe UI", 11.0f, FontStyleBold, UnitPixel);
+    SolidBrush subBrush(Color(255, 129, 140, 248));
+    GraphicsPath badge;
+    BuildRoundedRectPath(&badge, kSettingsPadX + 90.0f, 31.0f, 58.0f, 20.0f, 6.0f);
+    SolidBrush badgeBg(Color(255, 28, 33, 48));
+    Pen badgeBorder(Color(255, 52, 60, 84), 1.0f);
+    graphics->FillPath(&badgeBg, &badge);
+    graphics->DrawPath(&badgeBorder, &badge);
+    Gdiplus::StringFormat fmt;
+    fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+    fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+    RectF bRect(kSettingsPadX + 90.0f, 31.0f, 58.0f, 20.0f);
+    graphics->DrawString(version.c_str(), -1, &sub, bRect, &fmt, &subBrush);
 }
 
 static void DrawSettingsSectionHeader(Graphics *graphics, const wchar_t *text, float y) {
     Font font(L"Segoe UI", 10.0f, FontStyleBold, UnitPixel);
-    SolidBrush brush(Color(255, 116, 140, 142));
+    SolidBrush brush(Color(255, 148, 163, 184));
     graphics->DrawString(text, -1, &font, PointF(kSettingsPadX, y), &brush);
 }
 
@@ -73,37 +84,37 @@ static void DrawSettingsHotkeyCard(Graphics *graphics, const RECT &rect, const S
     BuildRoundedRectPath(&path, static_cast<float>(rect.left), static_cast<float>(rect.top),
                          static_cast<float>(RectWidth(rect)), static_cast<float>(RectHeight(rect)), 10.0f);
     bool hover = state.hover == SettingsHitHotkey || state.capturing;
-    SolidBrush fill(state.capturing ? Color(255, 23, 56, 50) :
-                    hover ? Color(255, 36, 46, 52) : Color(255, 28, 36, 42));
-    Pen border(state.capturing ? Color(255, 23, 198, 163) :
-               hover ? Color(255, 64, 84, 88) : Color(255, 50, 64, 70),
-               state.capturing ? 1.8f : 1.0f);
+    SolidBrush fill(state.capturing ? Color(255, 28, 32, 54) :
+                    hover ? Color(255, 26, 31, 44) : Color(255, 20, 23, 32));
+    Pen border(state.capturing ? Color(255, 99, 102, 241) :
+               hover ? Color(255, 72, 84, 108) : Color(255, 38, 44, 58),
+               state.capturing ? 1.6f : 1.0f);
     graphics->FillPath(&fill, &path);
     graphics->DrawPath(&border, &path);
 
     Font hintFont(L"Segoe UI", 10.0f, FontStyleRegular, UnitPixel);
-    SolidBrush hintBrush(Color(255, 138, 156, 158));
-    graphics->DrawString(state.capturing ? L"Press a key combination" : L"Capture hotkey",
+    SolidBrush hintBrush(Color(255, 148, 163, 184));
+    graphics->DrawString(state.capturing ? L"Listening for keys..." : L"Global Capture Hotkey",
                          -1, &hintFont, PointF(rect.left + 16.0f, rect.top + 10.0f), &hintBrush);
 
     std::wstring label;
     if (state.capturing) {
-        label = L"Listening...";
+        label = L"Press any combination (Esc to cancel)";
     } else {
         label = HotkeyText(state.pending);
     }
 
-    Font keyFont(L"Segoe UI", 16.0f, FontStyleBold, UnitPixel);
-    SolidBrush keyBrush(state.capturing ? Color(255, 23, 198, 163) : Color(255, 245, 251, 248));
+    Font keyFont(L"Segoe UI", 15.0f, FontStyleBold, UnitPixel);
+    SolidBrush keyBrush(state.capturing ? Color(255, 129, 140, 248) : Color(255, 248, 250, 252));
     graphics->DrawString(label.c_str(), -1, &keyFont, PointF(rect.left + 16.0f, rect.top + 32.0f), &keyBrush);
 
     if (!state.capturing) {
-        Font edit(L"Segoe UI", 12.0f, FontStyleRegular, UnitPixel);
-        SolidBrush editBrush(Color(255, 138, 156, 158));
-        RectF editRect(static_cast<float>(rect.right - 90), static_cast<float>(rect.top + 38), 80.0f, 20.0f);
+        Font edit(L"Segoe UI", 11.0f, FontStyleRegular, UnitPixel);
+        SolidBrush editBrush(Color(255, 129, 140, 248));
+        RectF editRect(static_cast<float>(rect.right - 100), static_cast<float>(rect.top + 38), 90.0f, 20.0f);
         Gdiplus::StringFormat fmt;
         fmt.SetAlignment(Gdiplus::StringAlignmentFar);
-        graphics->DrawString(L"Click to change", -1, &edit, editRect, &fmt, &editBrush);
+        graphics->DrawString(L"Record hotkey", -1, &edit, editRect, &fmt, &editBrush);
     }
 }
 
@@ -113,7 +124,7 @@ static void DrawSettingsCheckRow(Graphics *graphics, const RECT &rect, const Set
         GraphicsPath path;
         BuildRoundedRectPath(&path, static_cast<float>(rect.left - 8), static_cast<float>(rect.top - 6),
                              static_cast<float>(RectWidth(rect) + 16), static_cast<float>(RectHeight(rect) + 12), 8.0f);
-        SolidBrush fill(Color(255, 30, 38, 44));
+        SolidBrush fill(Color(255, 26, 31, 44));
         graphics->FillPath(&fill, &path);
     }
 
@@ -121,23 +132,23 @@ static void DrawSettingsCheckRow(Graphics *graphics, const RECT &rect, const Set
     float by = static_cast<float>(rect.top);
     GraphicsPath box;
     BuildRoundedRectPath(&box, bx, by + 2.0f, 20.0f, 20.0f, 5.0f);
-    SolidBrush boxFill(state.startup ? Color(255, 23, 198, 163) : Color(255, 24, 32, 38));
-    Pen boxPen(state.startup ? Color(255, 23, 198, 163) : Color(255, 90, 108, 112), 1.4f);
+    SolidBrush boxFill(state.startup ? Color(255, 99, 102, 241) : Color(255, 20, 24, 34));
+    Pen boxPen(state.startup ? Color(255, 99, 102, 241) : Color(255, 60, 72, 94), 1.2f);
     graphics->FillPath(&boxFill, &box);
     graphics->DrawPath(&boxPen, &box);
     if (state.startup) {
-        Pen check(Color(255, 16, 22, 26), 2.2f);
+        Pen check(Color(255, 255, 255, 255), 2.0f);
         graphics->DrawLine(&check, bx + 5.0f, by + 12.0f, bx + 9.0f, by + 16.0f);
         graphics->DrawLine(&check, bx + 9.0f, by + 16.0f, bx + 16.0f, by + 7.0f);
     }
 
     Font label(L"Segoe UI", 13.0f, FontStyleRegular, UnitPixel);
-    SolidBrush labelBrush(Color(255, 240, 246, 244));
+    SolidBrush labelBrush(Color(255, 248, 250, 252));
     graphics->DrawString(L"Start with Windows", -1, &label, PointF(bx + 32.0f, by - 1.0f), &labelBrush);
 
     Font desc(L"Segoe UI", 11.0f, FontStyleRegular, UnitPixel);
-    SolidBrush descBrush(Color(255, 138, 156, 158));
-    graphics->DrawString(L"Launch ModernScreenshot when you sign in",
+    SolidBrush descBrush(Color(255, 148, 163, 184));
+    graphics->DrawString(L"Launch ModernScreenshot automatically when you sign in",
                          -1, &desc, PointF(bx + 32.0f, by + 22.0f), &descBrush);
 }
 
@@ -148,29 +159,29 @@ static void DrawSettingsBanner(Graphics *graphics, const RECT &rect, const Setti
     Color fillColor, borderColor, textColor, glyphColor;
     const wchar_t *glyph = L"i";
     if (state.banner == BannerSuccess) {
-        fillColor = Color(255, 19, 60, 50);
-        borderColor = Color(255, 23, 198, 163);
-        textColor = Color(255, 230, 252, 244);
-        glyphColor = Color(255, 23, 198, 163);
+        fillColor = Color(255, 16, 45, 35);
+        borderColor = Color(255, 16, 185, 129);
+        textColor = Color(255, 209, 250, 229);
+        glyphColor = Color(255, 16, 185, 129);
         glyph = L"✓";
     } else if (state.banner == BannerWarning) {
-        fillColor = Color(255, 70, 52, 24);
-        borderColor = Color(255, 255, 184, 60);
-        textColor = Color(255, 254, 232, 196);
-        glyphColor = Color(255, 255, 184, 60);
+        fillColor = Color(255, 52, 38, 18);
+        borderColor = Color(255, 245, 158, 11);
+        textColor = Color(255, 254, 243, 199);
+        glyphColor = Color(255, 245, 158, 11);
         glyph = L"!";
     } else {
-        fillColor = Color(255, 32, 42, 50);
-        borderColor = Color(255, 86, 110, 124);
-        textColor = Color(255, 220, 232, 234);
-        glyphColor = Color(255, 138, 178, 198);
+        fillColor = Color(255, 26, 32, 54);
+        borderColor = Color(255, 129, 140, 248);
+        textColor = Color(255, 224, 231, 255);
+        glyphColor = Color(255, 129, 140, 248);
     }
 
     GraphicsPath path;
     BuildRoundedRectPath(&path, static_cast<float>(rect.left), static_cast<float>(rect.top),
                          static_cast<float>(RectWidth(rect)), static_cast<float>(RectHeight(rect)), 8.0f);
     SolidBrush fill(fillColor);
-    Pen border(borderColor, 1.2f);
+    Pen border(borderColor, 1.0f);
     graphics->FillPath(&fill, &path);
     graphics->DrawPath(&border, &path);
 
@@ -188,24 +199,21 @@ static void DrawSettingsButton(Graphics *graphics, const RECT &rect, const wchar
                                bool primary, bool hovered, bool pressed) {
     GraphicsPath path;
     BuildRoundedRectPath(&path, static_cast<float>(rect.left), static_cast<float>(rect.top),
-                         static_cast<float>(RectWidth(rect)), static_cast<float>(RectHeight(rect)), 9.0f);
+                         static_cast<float>(RectWidth(rect)), static_cast<float>(RectHeight(rect)), 8.0f);
     Color fillColor, borderColor, textColor;
     if (primary) {
-        BYTE alpha = pressed ? 220 : (hovered ? 255 : 240);
-        fillColor = Color(alpha, 23, 198, 163);
-        borderColor = Color(255, 23, 198, 163);
-        textColor = Color(255, 8, 22, 18);
+        fillColor = pressed ? Color(255, 79, 70, 229) : (hovered ? Color(255, 129, 140, 248) : Color(255, 99, 102, 241));
+        borderColor = Color(255, 129, 140, 248);
+        textColor = Color(255, 255, 255, 255);
     } else {
-        fillColor = pressed ? Color(255, 36, 46, 52) :
-                    hovered ? Color(255, 32, 42, 48) : Color(0, 0, 0, 0);
-        borderColor = hovered ? Color(255, 138, 156, 158) : Color(255, 86, 110, 114);
-        textColor = Color(255, 230, 240, 240);
+        fillColor = pressed ? Color(255, 38, 44, 60) :
+                    hovered ? Color(255, 30, 35, 48) : Color(255, 20, 23, 32);
+        borderColor = hovered ? Color(255, 72, 84, 108) : Color(255, 42, 48, 64);
+        textColor = Color(255, 226, 232, 240);
     }
     SolidBrush fill(fillColor);
-    Pen border(borderColor, 1.1f);
-    if (fillColor.GetA() > 0) {
-        graphics->FillPath(&fill, &path);
-    }
+    Pen border(borderColor, 1.0f);
+    graphics->FillPath(&fill, &path);
     graphics->DrawPath(&border, &path);
 
     Font font(L"Segoe UI", 13.0f, primary ? FontStyleBold : FontStyleRegular, UnitPixel);
@@ -220,7 +228,7 @@ static void DrawSettingsButton(Graphics *graphics, const RECT &rect, const wchar
 
 static void DrawSettingsHelpHint(Graphics *graphics, float y) {
     Font font(L"Segoe UI", 10.0f, FontStyleRegular, UnitPixel);
-    SolidBrush brush(Color(255, 96, 116, 120));
+    SolidBrush brush(Color(255, 100, 116, 139));
     graphics->DrawString(L"Esc: cancel capture   •   Enter: apply   •   Tab: focus controls",
                          -1, &font, PointF(kSettingsPadX, y), &brush);
 }
@@ -233,7 +241,7 @@ static void PaintSettingsWindow(HWND hwnd, HDC dc, const SettingsViewState &stat
     HBITMAP buffer = CreateCompatibleBitmap(dc, client.right, client.bottom);
     HGDIOBJ oldBuf = SelectObject(mem, buffer);
 
-    HBRUSH bg = CreateSolidBrush(RGB(22, 28, 33));
+    HBRUSH bg = CreateSolidBrush(RGB(13, 15, 18));
     FillRect(mem, &client, bg);
     DeleteObject(bg);
 
@@ -244,7 +252,7 @@ static void PaintSettingsWindow(HWND hwnd, HDC dc, const SettingsViewState &stat
 
         DrawSettingsTitle(&graphics);
 
-        Pen rule(Color(255, 40, 52, 60), 1.0f);
+        Pen rule(Color(255, 32, 38, 50), 1.0f);
         graphics.DrawLine(&rule, 0, 78, kSettingsClientW, 78);
 
         DrawSettingsSectionHeader(&graphics, L"HOTKEY", 90.0f - 12.0f);

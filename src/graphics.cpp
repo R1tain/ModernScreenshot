@@ -203,7 +203,7 @@ void DrawCenteredText(HDC dc, const wchar_t *text, const RECT &rect, int fontHei
 }
 
 void DrawToolbarIcon(HDC dc, Action action, const RECT &button, bool active) {
-    COLORREF color = active ? RGB(23, 198, 163) : RGB(220, 235, 235);
+    COLORREF color = active ? RGB(129, 140, 248) : RGB(240, 244, 250);
     float x = static_cast<float>(button.left);
     float y = static_cast<float>(button.top);
     float w = static_cast<float>(RectWidth(button));
@@ -345,7 +345,7 @@ void DrawAnnotation(HDC dc, const Annotation &op, int offsetX, int offsetY, int 
     } else if (op.tool == ToolRect) {
         RECT rect = NormalizeRectPoints(a, b);
         rect = ClampRect(rect, offsetX, offsetY, offsetX + maxW, offsetY + maxH);
-        HPEN pen = CreatePen(PS_SOLID, 3, RGB(23, 198, 163));
+        HPEN pen = CreatePen(PS_SOLID, 2, RGB(239, 68, 68));
         HGDIOBJ oldPen = SelectObject(dc, pen);
         HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
         Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
@@ -353,7 +353,7 @@ void DrawAnnotation(HDC dc, const Annotation &op, int offsetX, int offsetY, int 
         SelectObject(dc, oldPen);
         DeleteObject(pen);
     } else if (op.tool == ToolArrow) {
-        DrawArrow(dc, a, b, RGB(255, 207, 90));
+        DrawArrow(dc, a, b, RGB(245, 158, 11));
     } else if (op.tool == ToolText) {
         SIZE size;
         HFONT font = CreateFontW(-18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
@@ -362,9 +362,9 @@ void DrawAnnotation(HDC dc, const Annotation &op, int offsetX, int offsetY, int 
         HGDIOBJ oldFont = SelectObject(dc, font);
         GetTextExtentPoint32W(dc, op.text.c_str(), static_cast<int>(op.text.size()), &size);
         RECT bg = {a.x - 6, a.y - size.cy - 6, a.x + size.cx + 8, a.y + 6};
-        FillRectColor(dc, bg, RGB(16, 20, 24));
+        FillRectColor(dc, bg, RGB(13, 15, 18));
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(255, 207, 90));
+        SetTextColor(dc, RGB(248, 250, 252));
         TextOutW(dc, a.x, a.y - size.cy, op.text.c_str(), static_cast<int>(op.text.size()));
         SelectObject(dc, oldFont);
         DeleteObject(font);

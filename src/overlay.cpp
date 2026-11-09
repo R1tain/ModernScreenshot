@@ -7,17 +7,27 @@ static void DrawOverlayModeButton(HDC dc, const RECT &rect, const wchar_t *text,
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
         GraphicsPath path;
         BuildRoundedRectPath(&path, static_cast<float>(drawRect.left), static_cast<float>(drawRect.top),
-                             static_cast<float>(RectWidth(drawRect)), static_cast<float>(RectHeight(drawRect)), 10.0f);
-        SolidBrush fill(active ? Color(245, 23, 198, 163) : Color(230, 16, 21, 24));
-        Pen outline(active ? Color(255, 245, 251, 248) : Color(150, 82, 98, 100), active ? 1.4f : 1.0f);
+                             static_cast<float>(RectWidth(drawRect)), static_cast<float>(RectHeight(drawRect)), 8.0f);
+        SolidBrush fill(active ? Color(255, 99, 102, 241) : Color(200, 20, 24, 32));
+        Pen outline(active ? Color(255, 129, 140, 248) : Color(100, 48, 56, 72), active ? 1.2f : 1.0f);
         graphics.FillPath(&fill, &path);
         graphics.DrawPath(&outline, &path);
+
+        Font font(L"Segoe UI", 12.0f, active ? FontStyleBold : FontStyleRegular, UnitPixel);
+        SolidBrush textBrush(active ? Color(255, 255, 255, 255) : Color(255, 148, 163, 184));
+        Gdiplus::StringFormat fmt;
+        fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+        fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        RectF target(static_cast<float>(drawRect.left), static_cast<float>(drawRect.top),
+                     static_cast<float>(RectWidth(drawRect)), static_cast<float>(RectHeight(drawRect)));
+        graphics.DrawString(text, -1, &font, target, &fmt, &textBrush);
     } else {
-        FillRectColor(dc, drawRect, active ? RGB(23, 198, 163) : RGB(16, 21, 24));
+        FillRectColor(dc, drawRect, active ? RGB(99, 102, 241) : RGB(20, 24, 32));
+        DrawCenteredText(dc, text, drawRect, -13, FW_SEMIBOLD, active ? RGB(255, 255, 255) : RGB(148, 163, 184));
     }
-    DrawCenteredText(dc, text, drawRect, -14, FW_SEMIBOLD, active ? RGB(7, 11, 14) : RGB(245, 251, 248));
 }
 
 static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offsetX, int offsetY) {
@@ -28,7 +38,8 @@ static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offset
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        SolidBrush shade(Color(138, 7, 11, 14));
+        // Cinematic Raycast deep obsidian backdrop scrim
+        SolidBrush shade(Color(155, 10, 12, 16));
         graphics.FillRectangle(&shade, 0, 0, state->capture.w, state->capture.h);
     }
 
@@ -39,20 +50,21 @@ static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offset
         if (StartGdiplus()) {
             Graphics graphics(dc);
             graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
             GraphicsPath hintPath;
             BuildRoundedRectPath(&hintPath, static_cast<float>(hintBg.left - offsetX),
                                  static_cast<float>(hintBg.top - offsetY),
                                  static_cast<float>(RectWidth(hintBg)),
-                                 static_cast<float>(RectHeight(hintBg)), 10.0f);
-            SolidBrush pillFill(Color(220, 16, 21, 24));
-            Pen pillBorder(Color(170, 64, 80, 86), 1.0f);
+                                 static_cast<float>(RectHeight(hintBg)), 8.0f);
+            SolidBrush pillFill(Color(235, 13, 15, 20));
+            Pen pillBorder(Color(120, 48, 56, 72), 1.0f);
             graphics.FillPath(&pillFill, &hintPath);
             graphics.DrawPath(&pillBorder, &hintPath);
             const wchar_t *hint = state->kind == CaptureLongRegion
                                       ? L"Drag the scrollable area, then release to start auto capture"
                                       : L"Drag any region. Press Tab to switch to long capture.";
             Font hintFont(L"Segoe UI", 12.0f, FontStyleRegular, UnitPixel);
-            SolidBrush hintBrush(Color(255, 230, 240, 240));
+            SolidBrush hintBrush(Color(255, 148, 163, 184));
             Gdiplus::StringFormat fmt;
             fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
             fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
@@ -64,7 +76,7 @@ static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offset
         } else {
             FillRectColor(dc, {hintBg.left - offsetX, hintBg.top - offsetY,
                                hintBg.right - offsetX, hintBg.bottom - offsetY},
-                          RGB(16, 21, 24));
+                          RGB(13, 15, 20));
         }
         DrawOverlayModeButton(dc, OverlayModeRect(cw, ch, 0), L"Region",
                               state->kind == CaptureRegion, offsetX, offsetY);
@@ -75,50 +87,101 @@ static void DrawOverlayOffset(OverlayState *state, HWND hwnd, HDC dc, int offset
     if (state->dragging) {
         RECT local = NormalizeRectPoints(state->start, state->current);
         local = ClampRect(local, 0, 0, state->capture.w, state->capture.h);
-        if (RectWidth(local) > 0 && RectHeight(local) > 0) {
-            BitBlt(dc, local.left - offsetX, local.top - offsetY, RectWidth(local), RectHeight(local), source,
+        int rw = RectWidth(local);
+        int rh = RectHeight(local);
+        if (rw > 0 && rh > 0) {
+            BitBlt(dc, local.left - offsetX, local.top - offsetY, rw, rh, source,
                    local.left, local.top, SRCCOPY);
-            if (StartGdiplus()) {
-                Graphics graphics(dc);
-                graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-                Pen accent(Color(255, 23, 198, 163), 2.4f);
-                Pen white(Color(220, 245, 251, 248), 1.2f);
-                int drawLeft = local.left - offsetX;
-                int drawTop = local.top - offsetY;
-                graphics.DrawRectangle(&accent, drawLeft, drawTop, RectWidth(local), RectHeight(local));
-                int handle = 13;
-                SolidBrush handleBrush(Color(255, 245, 251, 248));
-                graphics.FillEllipse(&handleBrush, drawLeft - handle / 2, drawTop - handle / 2, handle, handle);
-                graphics.FillEllipse(&handleBrush, local.right - offsetX - handle / 2, drawTop - handle / 2, handle, handle);
-                graphics.FillEllipse(&handleBrush, drawLeft - handle / 2, local.bottom - offsetY - handle / 2, handle, handle);
-                graphics.FillEllipse(&handleBrush, local.right - offsetX - handle / 2,
-                                     local.bottom - offsetY - handle / 2, handle, handle);
-                graphics.DrawRectangle(&white, drawLeft + 1, drawTop + 1,
-                                       std::max(0, RectWidth(local) - 2), std::max(0, RectHeight(local) - 2));
-            }
+            int drawLeft = local.left - offsetX;
+            int drawTop = local.top - offsetY;
+            int drawRight = local.right - offsetX;
+            int drawBottom = local.bottom - offsetY;
 
-            wchar_t label[64];
-            wsprintfW(label, L"%d x %d", RectWidth(local), RectHeight(local));
-            RECT pill = {local.left, local.top - 28, local.left + 92, local.top - 4};
-            if (pill.top < 8) {
-                OffsetRect(&pill, 0, 36);
-            }
             if (StartGdiplus()) {
                 Graphics graphics(dc);
                 graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-                GraphicsPath path;
-                BuildRoundedRectPath(&path, static_cast<float>(pill.left - offsetX),
-                                     static_cast<float>(pill.top - offsetY),
-                                     static_cast<float>(RectWidth(pill)),
-                                     static_cast<float>(RectHeight(pill)), 7.0f);
-                SolidBrush brush(Color(236, 16, 21, 24));
-                graphics.FillPath(&brush, &path);
+                graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+                // Modern Electric Indigo border
+                Pen accent(Color(255, 99, 102, 241), 1.5f);
+                Pen innerLine(Color(80, 255, 255, 255), 1.0f);
+                graphics.DrawRectangle(&accent, drawLeft, drawTop, rw, rh);
+                if (rw > 2 && rh > 2) {
+                    graphics.DrawRectangle(&innerLine, drawLeft + 1, drawTop + 1, rw - 2, rh - 2);
+                }
+
+                // 8 Modern circular dot handles (4 corners + 4 edge centers)
+                struct HandlePoint { float x; float y; };
+                HandlePoint handles[8] = {
+                    { static_cast<float>(drawLeft), static_cast<float>(drawTop) },
+                    { static_cast<float>(drawLeft + rw / 2), static_cast<float>(drawTop) },
+                    { static_cast<float>(drawRight), static_cast<float>(drawTop) },
+                    { static_cast<float>(drawRight), static_cast<float>(drawTop + rh / 2) },
+                    { static_cast<float>(drawRight), static_cast<float>(drawBottom) },
+                    { static_cast<float>(drawLeft + rw / 2), static_cast<float>(drawBottom) },
+                    { static_cast<float>(drawLeft), static_cast<float>(drawBottom) },
+                    { static_cast<float>(drawLeft), static_cast<float>(drawTop + rh / 2) }
+                };
+
+                const float dotRadius = 4.0f;
+                SolidBrush whiteBrush(Color(255, 255, 255, 255));
+                Pen dotPen(Color(255, 99, 102, 241), 1.6f);
+                Pen shadowPen(Color(120, 0, 0, 0), 1.0f);
+
+                for (const auto &hp : handles) {
+                    graphics.DrawEllipse(&shadowPen, hp.x - dotRadius - 0.5f, hp.y - dotRadius - 0.5f,
+                                         dotRadius * 2.0f + 1.0f, dotRadius * 2.0f + 1.0f);
+                    graphics.FillEllipse(&whiteBrush, hp.x - dotRadius, hp.y - dotRadius,
+                                         dotRadius * 2.0f, dotRadius * 2.0f);
+                    graphics.DrawEllipse(&dotPen, hp.x - dotRadius, hp.y - dotRadius,
+                                         dotRadius * 2.0f, dotRadius * 2.0f);
+                }
+
+                // Sleek Floating Dimension HUD: [ • 1920 × 1080 px ]
+                wchar_t label[64];
+                wsprintfW(label, L"%d × %d", rw, rh);
+
+                int hudW = 108;
+                int hudH = 26;
+                int hudX = drawLeft;
+                int hudY = drawTop - hudH - 8;
+                if (hudY < 10) {
+                    hudY = drawTop + 10;
+                }
+                if (hudX + hudW > state->capture.w - 10) {
+                    hudX = state->capture.w - hudW - 10;
+                }
+                if (hudX < 10) {
+                    hudX = 10;
+                }
+
+                GraphicsPath hudPath;
+                BuildRoundedRectPath(&hudPath, static_cast<float>(hudX), static_cast<float>(hudY),
+                                     static_cast<float>(hudW), static_cast<float>(hudH), 13.0f);
+                SolidBrush hudBg(Color(235, 13, 15, 20));
+                Pen hudBorder(Color(180, 56, 64, 82), 1.0f);
+                graphics.FillPath(&hudBg, &hudPath);
+                graphics.DrawPath(&hudBorder, &hudPath);
+
+                // Small glowing cyan dot
+                SolidBrush dotAccent(Color(255, 56, 189, 248));
+                graphics.FillEllipse(&dotAccent, static_cast<float>(hudX + 11), static_cast<float>(hudY + 10), 6.0f, 6.0f);
+
+                // Size text in pure crisp white
+                Font hudFont(L"Segoe UI", 12.0f, FontStyleBold, UnitPixel);
+                SolidBrush hudText(Color(255, 248, 250, 252));
+                graphics.DrawString(label, -1, &hudFont,
+                                    PointF(static_cast<float>(hudX + 24), static_cast<float>(hudY + 5)),
+                                    &hudText);
             } else {
-                RECT drawPill = {pill.left - offsetX, pill.top - offsetY,
-                                 pill.right - offsetX, pill.bottom - offsetY};
-                FillRectColor(dc, drawPill, RGB(16, 21, 24));
+                HPEN pen = CreatePen(PS_SOLID, 2, RGB(99, 102, 241));
+                HGDIOBJ oldPen = SelectObject(dc, pen);
+                HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+                Rectangle(dc, drawLeft, drawTop, drawRight, drawBottom);
+                SelectObject(dc, oldBrush);
+                SelectObject(dc, oldPen);
+                DeleteObject(pen);
             }
-            DrawTextLabel(dc, label, pill.left - offsetX + 10, pill.top - offsetY + 4, RGB(245, 251, 248));
         }
     }
 
@@ -144,13 +207,13 @@ static RECT OverlayVisualBounds(OverlayState *state) {
     }
 
     RECT bounds = ExpandedRect(local, 20, state->capture.w, state->capture.h);
-    RECT label = {local.left, local.top - 28, local.left + 92, local.top - 4};
+    RECT label = {local.left, local.top - 36, local.left + 120, local.top};
     if (label.top < 8) {
-        OffsetRect(&label, 0, 36);
+        OffsetRect(&label, 0, 48);
     }
     label = ClampRect(label, 0, 0, state->capture.w, state->capture.h);
     UnionRect(&bounds, &bounds, &label);
-    return ExpandedRect(bounds, 2, state->capture.w, state->capture.h);
+    return ExpandedRect(bounds, 4, state->capture.w, state->capture.h);
 }
 
 static void InvalidateOverlayChange(HWND hwnd, OverlayState *state, const RECT &oldBounds) {
