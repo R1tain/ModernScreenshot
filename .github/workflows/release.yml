@@ -49,7 +49,11 @@ jobs:
             fi
             version="${latest#v}"
             IFS=. read -r major minor patch <<< "$version"
-            tag="v${major}.${minor}.$((patch + 1))"
+            if (( major < 2 )); then
+              tag="v2.0.0"
+            else
+              tag="v${major}.${minor}.$((patch + 1))"
+            fi
             prerelease="false"
           fi
 

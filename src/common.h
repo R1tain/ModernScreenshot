@@ -25,7 +25,7 @@
 #include <vector>
 
 #ifndef VERSION
-#define VERSION "0.1.0"
+#define VERSION "2.0.0"
 #endif
 
 #define WIDEN2(x) L##x

@@ -7,11 +7,14 @@ namespace ModernScreenshot {
 
 struct OverlayState {
     ScreenCapture capture;
+    HCURSOR aeroCursor = NULL;
+    HCURSOR aeroHoverCursor = NULL;
+    HDC backDc = NULL;
+    HBITMAP backBitmap = NULL;
+    HGDIOBJ backOldObj = NULL;
     bool showModeButtons = false;
     CaptureKind kind = CaptureRegion;
     int hoverMode = -1;
-    bool hasMouse = false;
-    POINT mouse = {0, 0};
     bool dragging = false;
     bool done = false;
     bool cancelled = false;

@@ -22,39 +22,117 @@ Settings GetAppSettings() { return g_settings; }
 void SetAppSettings(const Settings &s) { g_settings = s; }
 
 static HICON CreateTrayIcon() {
-    HDC screen = GetDC(NULL);
-    HDC dc = CreateCompatibleDC(screen);
-    HBITMAP color = CreateCompatibleBitmap(screen, 32, 32);
-    std::vector<BYTE> maskBits(32 * 32 / 8, 0);
-    HBITMAP mask = CreateBitmap(32, 32, 1, 1, maskBits.data());
-    HGDIOBJ old = SelectObject(dc, color);
+    if (!StartGdiplus()) {
+        return LoadIcon(NULL, IDI_APPLICATION);
+    }
 
-    RECT bg = {0, 0, 32, 32};
-    FillRectColor(dc, bg, RGB(13, 15, 18));
-    HBRUSH accent = CreateSolidBrush(RGB(99, 102, 241));
-    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(dc, accent));
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(248, 250, 252));
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    RoundRect(dc, 5, 6, 27, 24, 7, 7);
-    MoveToEx(dc, 11, 15, NULL);
-    LineTo(dc, 21, 15);
-    MoveToEx(dc, 16, 10, NULL);
-    LineTo(dc, 16, 20);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(accent);
-    SelectObject(dc, old);
-    DeleteDC(dc);
+    const int size = 48;
+    BITMAPV5HEADER bi = {};
+    bi.bV5Size = sizeof(bi);
+    bi.bV5Width = size;
+    bi.bV5Height = -size;
+    bi.bV5Planes = 1;
+    bi.bV5BitCount = 32;
+    bi.bV5Compression = BI_BITFIELDS;
+    bi.bV5RedMask = 0x00FF0000;
+    bi.bV5GreenMask = 0x0000FF00;
+    bi.bV5BlueMask = 0x000000FF;
+    bi.bV5AlphaMask = 0xFF000000;
+
+    HDC screen = GetDC(NULL);
+    void *bits = NULL;
+    HBITMAP colorBmp = CreateDIBSection(screen, reinterpret_cast<BITMAPINFO *>(&bi),
+                                        DIB_RGB_COLORS, &bits, NULL, 0);
     ReleaseDC(NULL, screen);
+    if (!colorBmp || !bits) {
+        if (colorBmp) DeleteObject(colorBmp);
+        return LoadIcon(NULL, IDI_APPLICATION);
+    }
+
+    std::memset(bits, 0, static_cast<size_t>(size) * static_cast<size_t>(size) * 4);
+
+    {
+        Bitmap canvas(size, size, size * 4, PixelFormat32bppARGB, static_cast<BYTE *>(bits));
+        Graphics g(&canvas);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+
+        // 1. Apple macOS Squircle Glass Base (transparent outer corners)
+        GraphicsPath squircle;
+        BuildRoundedRectPath(&squircle, 3.0f, 3.0f, 42.0f, 42.0f, 11.5f);
+
+        Gdiplus::LinearGradientBrush bgGrad(
+            PointF(3.0f, 3.0f), PointF(45.0f, 45.0f),
+            Color(250, 36, 168, 255),   // Top-left: Electric Sky-Blue
+            Color(252, 67, 56, 202));   // Bottom-right: Deep Electric Indigo
+        g.FillPath(&bgGrad, &squircle);
+
+        // 2. Top-half Frosted Glass Specular Sheen
+        GraphicsPath sheenPath;
+        BuildRoundedRectPath(&sheenPath, 4.5f, 4.5f, 39.0f, 19.5f, 10.0f);
+        Gdiplus::LinearGradientBrush sheenGrad(
+            PointF(0.0f, 4.0f), PointF(0.0f, 24.0f),
+            Color(115, 255, 255, 255),
+            Color(5, 255, 255, 255));
+        g.FillPath(&sheenGrad, &sheenPath);
+
+        // 3. Specular Glass Outer Rim
+        Gdiplus::LinearGradientBrush rimGrad(
+            PointF(3.0f, 3.0f), PointF(3.0f, 45.0f),
+            Color(220, 224, 242, 254),
+            Color(130, 129, 140, 248));
+        Pen rimPen(&rimGrad, 1.6f);
+        g.DrawPath(&rimPen, &squircle);
+
+        // 4. Inner Frosted Viewfinder Frame (4 rounded corner brackets)
+        Pen shadowPen(Color(90, 0, 0, 0), 3.4f);
+        shadowPen.SetStartCap(Gdiplus::LineCapRound);
+        shadowPen.SetEndCap(Gdiplus::LineCapRound);
+        shadowPen.SetLineJoin(Gdiplus::LineJoinRound);
+
+        Pen bracketPen(Color(255, 255, 255, 255), 3.0f);
+        bracketPen.SetStartCap(Gdiplus::LineCapRound);
+        bracketPen.SetEndCap(Gdiplus::LineCapRound);
+        bracketPen.SetLineJoin(Gdiplus::LineJoinRound);
+
+        auto drawBrackets = [&](Pen *p, float dy) {
+            float L = 11.5f, T = 11.5f + dy, R = 36.5f, B = 36.5f + dy;
+            float arm = 7.5f;
+            // Top-left
+            g.DrawLine(p, L, T + arm, L, T);
+            g.DrawLine(p, L, T, L + arm, T);
+            // Top-right
+            g.DrawLine(p, R - arm, T, R, T);
+            g.DrawLine(p, R, T, R, T + arm);
+            // Bottom-left
+            g.DrawLine(p, L, B - arm, L, B);
+            g.DrawLine(p, L, B, L + arm, B);
+            // Bottom-right
+            g.DrawLine(p, R - arm, B, R, B);
+            g.DrawLine(p, R, B - arm, R, B);
+        };
+        drawBrackets(&shadowPen, 1.0f);
+        drawBrackets(&bracketPen, 0.0f);
+
+        // 5. Center Luminous Glass Lens Core
+        SolidBrush lensGlow(Color(85, 255, 255, 255));
+        g.FillEllipse(&lensGlow, 17.5f, 17.5f, 13.0f, 13.0f);
+        Pen lensRing(Color(245, 255, 255, 255), 2.0f);
+        g.DrawEllipse(&lensRing, 18.5f, 18.5f, 11.0f, 11.0f);
+        SolidBrush lensDot(Color(255, 125, 211, 252));
+        g.FillEllipse(&lensDot, 21.5f, 21.5f, 5.0f, 5.0f);
+    }
+
+    std::vector<BYTE> maskBits(size * size / 8, 0);
+    HBITMAP maskBmp = CreateBitmap(size, size, 1, 1, maskBits.data());
 
     ICONINFO info = {};
     info.fIcon = TRUE;
-    info.hbmColor = color;
-    info.hbmMask = mask;
+    info.hbmColor = colorBmp;
+    info.hbmMask = maskBmp;
     HICON icon = CreateIconIndirect(&info);
-    DeleteObject(color);
-    DeleteObject(mask);
+    DeleteObject(colorBmp);
+    DeleteObject(maskBmp);
     return icon ? icon : LoadIcon(NULL, IDI_APPLICATION);
 }
 

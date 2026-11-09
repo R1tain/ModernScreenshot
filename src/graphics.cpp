@@ -202,6 +202,143 @@ void DrawCenteredText(HDC dc, const wchar_t *text, const RECT &rect, int fontHei
     DeleteObject(font);
 }
 
+HCURSOR CreateAeroGlassCursor(bool interactiveOrb) {
+    if (!StartGdiplus()) {
+        return LoadCursor(NULL, interactiveOrb ? IDC_HAND : IDC_ARROW);
+    }
+
+    const int size = 32;
+    BITMAPV5HEADER bi = {};
+    bi.bV5Size = sizeof(bi);
+    bi.bV5Width = size;
+    bi.bV5Height = -size;
+    bi.bV5Planes = 1;
+    bi.bV5BitCount = 32;
+    bi.bV5Compression = BI_BITFIELDS;
+    bi.bV5RedMask = 0x00FF0000;
+    bi.bV5GreenMask = 0x0000FF00;
+    bi.bV5BlueMask = 0x000000FF;
+    bi.bV5AlphaMask = 0xFF000000;
+
+    HDC screen = GetDC(NULL);
+    void *bits = NULL;
+    HBITMAP colorBmp = CreateDIBSection(screen, reinterpret_cast<BITMAPINFO *>(&bi),
+                                        DIB_RGB_COLORS, &bits, NULL, 0);
+    ReleaseDC(NULL, screen);
+    if (!colorBmp || !bits) {
+        if (colorBmp) DeleteObject(colorBmp);
+        return LoadCursor(NULL, interactiveOrb ? IDC_HAND : IDC_ARROW);
+    }
+
+    std::memset(bits, 0, static_cast<size_t>(size) * static_cast<size_t>(size) * 4);
+
+    {
+        Bitmap canvas(size, size, size * 4, PixelFormat32bppARGB, static_cast<BYTE *>(bits));
+        Graphics g(&canvas);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+
+        PointF arrow[7] = {
+            PointF(3.0f, 3.0f),
+            PointF(3.0f, 21.5f),
+            PointF(7.8f, 17.0f),
+            PointF(11.2f, 24.5f),
+            PointF(14.2f, 23.1f),
+            PointF(10.8f, 15.6f),
+            PointF(17.2f, 15.6f)
+        };
+
+        PointF shadowPts[7];
+        for (int i = 0; i < 7; ++i) {
+            shadowPts[i] = PointF(arrow[i].X + 1.5f, arrow[i].Y + 2.0f);
+        }
+
+        // 1. Soft Aero drop shadow
+        GraphicsPath shadowPath;
+        shadowPath.AddPolygon(shadowPts, 7);
+        SolidBrush shadowFill(Color(95, 0, 0, 0));
+        Pen shadowPen(Color(55, 0, 0, 0), 2.0f);
+        shadowPen.SetLineJoin(Gdiplus::LineJoinRound);
+        g.FillPath(&shadowFill, &shadowPath);
+        g.DrawPath(&shadowPen, &shadowPath);
+
+        // 2. Windows 7 Aero Glass Arrow Body
+        GraphicsPath arrowPath;
+        arrowPath.AddPolygon(arrow, 7);
+
+        Gdiplus::LinearGradientBrush glassGrad(
+            PointF(3.0f, 3.0f), PointF(17.5f, 24.5f),
+            interactiveOrb ? Color(250, 210, 242, 255) : Color(245, 250, 254, 255),
+            interactiveOrb ? Color(245, 24, 148, 255) : Color(232, 130, 206, 252));
+        g.FillPath(&glassGrad, &arrowPath);
+
+        // 3. Signature Win7 Aero split-facet crystal reflection on left half of arrow
+        PointF facet[3] = {
+            PointF(3.8f, 4.8f),
+            PointF(3.8f, 19.2f),
+            PointF(10.2f, 14.4f)
+        };
+        Gdiplus::LinearGradientBrush facetGrad(
+            PointF(3.8f, 4.5f), PointF(10.2f, 19.2f),
+            Color(200, 255, 255, 255),
+            Color(30, 255, 255, 255));
+        g.FillPolygon(&facetGrad, facet, 3);
+
+        // 4. Inner white glass bevel + crisp dark Aero contour
+        Pen innerBevel(Color(210, 255, 255, 255), 1.6f);
+        innerBevel.SetLineJoin(Gdiplus::LineJoinRound);
+        g.DrawPath(&innerBevel, &arrowPath);
+
+        Pen outerContour(Color(240, 20, 38, 62), 1.2f);
+        outerContour.SetLineJoin(Gdiplus::LineJoinRound);
+        g.DrawPath(&outerContour, &arrowPath);
+
+        // 5. Windows 7 Aero Glass Interactive Blue Orb (shown when hovering clickable mode buttons)
+        if (interactiveOrb) {
+            float ox = 15.5f, oy = 4.0f, od = 13.0f;
+            SolidBrush orbShadow(Color(90, 0, 0, 0));
+            g.FillEllipse(&orbShadow, ox + 1.0f, oy + 1.5f, od, od);
+
+            Gdiplus::LinearGradientBrush orbGrad(
+                PointF(ox, oy), PointF(ox + od, oy + od),
+                Color(250, 125, 228, 255),
+                Color(248, 0, 114, 226));
+            g.FillEllipse(&orbGrad, ox, oy, od, od);
+
+            // Inner cyan core glow
+            SolidBrush coreGlow(Color(110, 186, 240, 255));
+            g.FillEllipse(&coreGlow, ox + 2.5f, oy + 5.5f, od - 5.0f, od - 6.5f);
+
+            // Upper glass crescent specular shine
+            Gdiplus::LinearGradientBrush crescentGrad(
+                PointF(ox, oy + 1.0f), PointF(ox, oy + 6.5f),
+                Color(220, 255, 255, 255),
+                Color(15, 255, 255, 255));
+            g.FillEllipse(&crescentGrad, ox + 2.2f, oy + 1.2f, od - 4.4f, 5.2f);
+
+            Pen orbRim(Color(235, 224, 246, 255), 1.1f);
+            g.DrawEllipse(&orbRim, ox, oy, od, od);
+            Pen orbOuter(Color(200, 14, 72, 140), 0.9f);
+            g.DrawEllipse(&orbOuter, ox - 0.3f, oy - 0.3f, od + 0.6f, od + 0.6f);
+        }
+    }
+
+    std::vector<BYTE> maskBits(size * size / 8, 0);
+    HBITMAP maskBmp = CreateBitmap(size, size, 1, 1, maskBits.data());
+
+    ICONINFO ii = {};
+    ii.fIcon = FALSE;
+    ii.xHotspot = 3;
+    ii.yHotspot = 3;
+    ii.hbmMask = maskBmp;
+    ii.hbmColor = colorBmp;
+
+    HCURSOR cursor = reinterpret_cast<HCURSOR>(CreateIconIndirect(&ii));
+    DeleteObject(colorBmp);
+    DeleteObject(maskBmp);
+    return cursor ? cursor : LoadCursor(NULL, interactiveOrb ? IDC_HAND : IDC_ARROW);
+}
+
 void ApplyWindowGlassStyle(HWND hwnd, int cornerRadius, BYTE alpha) {
     if (!hwnd || !IsWindow(hwnd)) return;
 
