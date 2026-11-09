@@ -285,6 +285,14 @@ void RegisterWindowClasses(HINSTANCE instance) {
     longSession.lpszClassName = kLongSessionClass;
     RegisterClassW(&longSession);
 
+    WNDCLASSW longPreview = {};
+    longPreview.lpfnWndProc = LongPreviewProc;
+    longPreview.hInstance = instance;
+    longPreview.hCursor = LoadCursor(NULL, IDC_ARROW);
+    longPreview.hbrBackground = NULL;
+    longPreview.lpszClassName = kLongPreviewClass;
+    RegisterClassW(&longPreview);
+
     WNDCLASSW editor = {};
     editor.lpfnWndProc = EditorProc;
     editor.hInstance = instance;
@@ -316,6 +324,7 @@ void UnregisterWindowClasses(HINSTANCE instance) {
     UnregisterClassW(kSettingsClass, instance);
     UnregisterClassW(kEditorClass, instance);
     UnregisterClassW(kLongSessionClass, instance);
+    UnregisterClassW(kLongPreviewClass, instance);
     UnregisterClassW(kOverlayClass, instance);
     UnregisterClassW(kHiddenClass, instance);
 }

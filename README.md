@@ -15,7 +15,11 @@ The implementation is intentionally small and zero-dependency:
 - **Global Hotkey**: Default `Ctrl+1`, configurable to any key or modifier combination
 - **System Tray**: Custom-drawn dark popup menu with Capture, Long Capture, Settings, and Exit
 - **Region Selection Overlay**: Fullscreen dark mask with pixel dimension badge and mode toggle
-- **Long Screenshot Mode**: Automatic window scrolling, settle delay, seam template matching, and seamless stitching
+- **PixPin-Grade Long Screenshot (Scrolling Capture)**:
+  - **Dual-Mode Scrolling**: Free natural mouse wheel scrolling (interactive user-driven) or smooth hands-free Auto-Scroll (`▶ Auto` / `⏸ Pause`)
+  - **Sleek Floating Capsule HUD**: Compact non-intrusive floating bar showing real-time height ticker (`● 3,450 px`), frame count, Auto toggle, Finish, and Cancel
+  - **Docked Live Thumbnail Preview**: Miniature preview strip pinned to the selection edge showing the stitched screenshot growing downward in real-time
+  - **Robust Multi-Template Seam Engine**: Dual-template cross-verification with automatic margin exclusion (immune to moving scrollbars and sticky web navbars)
 - **PixPin-Style Vector Editor**:
   - `Blur` / Mosaic for sensitive information
   - `Arrow` with smooth antialiased arrowheads
