@@ -50,23 +50,21 @@ static bool ScrollEditor(EditorState *state, HWND hwnd, int delta) {
 
 static void DrawToolbar(EditorState *state, HDC dc) {
     RECT toolbar = {0, 0, state->winW, kToolbarH};
-    FillRectColor(dc, toolbar, RGB(13, 15, 18));
+    FillRectColor(dc, toolbar, RGB(14, 17, 24));
 
-    if (StartGdiplus()) {
-        Graphics graphics(dc);
-        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        SolidBrush panel(Color(248, 15, 17, 23));
-        graphics.FillRectangle(&panel, 0, 0, state->winW, kToolbarH);
-        Pen line(Color(180, 36, 42, 54), 1.0f);
-        graphics.DrawLine(&line, 0, kToolbarH - 1, state->winW, kToolbarH - 1);
-    } else {
-        HPEN border = CreatePen(PS_SOLID, 1, RGB(36, 42, 54));
-        HGDIOBJ oldPen = SelectObject(dc, border);
-        MoveToEx(dc, 0, kToolbarH - 1, NULL);
-        LineTo(dc, state->winW, kToolbarH - 1);
-        SelectObject(dc, oldPen);
-        DeleteObject(border);
+    // Refract top slice of the screenshot through the frosted glass toolbar (macOS vibrancy)
+    if (state->shot && state->w > 0 && state->h > 0) {
+        HDC source = CreateCompatibleDC(dc);
+        HGDIOBJ old = SelectObject(source, state->shot);
+        int sampleH = std::min(state->h - state->scrollY, std::max(16, kToolbarH));
+        SetStretchBltMode(dc, HALFTONE);
+        StretchBlt(dc, 0, 0, state->winW, kToolbarH,
+                   source, 0, state->scrollY, state->w, std::max(1, sampleH), SRCCOPY);
+        SelectObject(source, old);
+        DeleteDC(source);
     }
+
+    DrawGlassPanel(dc, toolbar, 0.0f, true, false);
 
     int separatorAfter = ToolbarToolGroupEnd();
 
@@ -75,37 +73,16 @@ static void DrawToolbar(EditorState *state, HDC dc) {
         bool isTool = IsToolButton(i);
         bool active = isTool && kButtons[i].tool == state->activeTool;
         bool hover = i == state->hoverButton;
-        if (StartGdiplus()) {
-            Graphics graphics(dc);
-            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-            GraphicsPath path;
-            BuildRoundedRectPath(&path, static_cast<float>(button.left), static_cast<float>(button.top),
-                                 static_cast<float>(RectWidth(button)),
-                                 static_cast<float>(RectHeight(button)), 8.0f);
-            Color fillColor = active ? (hover ? Color(255, 52, 56, 88) : Color(255, 42, 45, 74))
-                                     : (hover ? Color(255, 30, 35, 48) : Color(255, 20, 23, 31));
-            Color outlineColor = active ? Color(255, 129, 140, 248)
-                                        : (hover ? Color(255, 72, 84, 108) : Color(100, 38, 44, 58));
-            SolidBrush fill(fillColor);
-            Pen outline(outlineColor, active ? 1.4f : 1.0f);
-            graphics.FillPath(&fill, &path);
-            graphics.DrawPath(&outline, &path);
-        } else {
-            FillRectColor(dc, button, active ? RGB(42, 45, 74) : (hover ? RGB(30, 35, 48) : RGB(20, 23, 31)));
-            HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(129, 140, 248) : RGB(38, 44, 58));
-            HGDIOBJ old = SelectObject(dc, pen);
-            HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-            Rectangle(dc, button.left, button.top, button.right, button.bottom);
-            SelectObject(dc, oldBrush);
-            SelectObject(dc, old);
-            DeleteObject(pen);
-        }
+        bool isPrimaryAction = (kButtons[i].action == ActionCopy || kButtons[i].action == ActionSave) && hover;
 
-        DrawToolbarIcon(dc, kButtons[i].action, button, active);
+        DrawGlassButton(dc, button, 9.0f, isPrimaryAction, active, hover, false, false);
+        DrawToolbarIcon(dc, kButtons[i].action, button, active || isPrimaryAction);
+
         RECT labelRect = {button.left, button.bottom - 15, button.right, button.bottom - 2};
-        COLORREF labelColor = active ? RGB(129, 140, 248)
-                                     : (hover ? RGB(248, 250, 252) : RGB(148, 163, 184));
-        DrawCenteredText(dc, kButtons[i].label, labelRect, -10, FW_MEDIUM, labelColor);
+        COLORREF labelColor = (active || isPrimaryAction)
+                                  ? RGB(255, 255, 255)
+                                  : (hover ? RGB(248, 250, 252) : RGB(203, 213, 225));
+        DrawCenteredText(dc, kButtons[i].label, labelRect, -10, (active || isPrimaryAction) ? FW_SEMIBOLD : FW_MEDIUM, labelColor);
 
         if (i + 1 == separatorAfter && separatorAfter < ButtonCount()) {
             RECT next = ButtonRect(i + 1);
@@ -113,13 +90,13 @@ static void DrawToolbar(EditorState *state, HDC dc) {
             if (StartGdiplus()) {
                 Graphics graphics(dc);
                 graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-                Pen sep(Color(180, 42, 48, 62), 1.0f);
-                graphics.DrawLine(&sep, sepX, button.top + 6, sepX, button.bottom - 6);
+                Pen sep(Color(75, 255, 255, 255), 1.0f);
+                graphics.DrawLine(&sep, sepX, button.top + 8, sepX, button.bottom - 8);
             } else {
-                HPEN sep = CreatePen(PS_SOLID, 1, RGB(42, 48, 62));
+                HPEN sep = CreatePen(PS_SOLID, 1, RGB(64, 74, 94));
                 HGDIOBJ oldSep = SelectObject(dc, sep);
-                MoveToEx(dc, sepX, button.top + 6, NULL);
-                LineTo(dc, sepX, button.bottom - 6);
+                MoveToEx(dc, sepX, button.top + 8, NULL);
+                LineTo(dc, sepX, button.bottom - 8);
                 SelectObject(dc, oldSep);
                 DeleteObject(sep);
             }
@@ -127,7 +104,7 @@ static void DrawToolbar(EditorState *state, HDC dc) {
     }
 
     if (!state->statusText.empty() && state->winW > ToolbarWidth() + 120) {
-        DrawTextLabel(dc, state->statusText, ToolbarWidth() + 16, 22, RGB(148, 163, 184));
+        DrawTextLabel(dc, state->statusText, ToolbarWidth() + 16, 22, RGB(226, 232, 240));
     }
 }
 
@@ -183,23 +160,31 @@ bool CopyEditor(EditorState *state, HWND hwnd) {
 
 static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
     RECT bg = {0, 0, state->winW, state->winH};
-    FillRectColor(dc, bg, RGB(9, 10, 14));
+    FillRectColor(dc, bg, RGB(14, 17, 24));
 
     HDC source = CreateCompatibleDC(dc);
     HGDIOBJ old = SelectObject(source, state->shot);
     int visibleH = std::min(state->viewH, state->h - state->scrollY);
+
+    // If the window is wider than the screenshot, fill side margins with frosted ambient refraction
+    if (state->imageX > 0 && visibleH > 0) {
+        SetStretchBltMode(dc, HALFTONE);
+        StretchBlt(dc, 0, state->imageY, state->winW, state->viewH,
+                   source, 0, state->scrollY, state->w, visibleH, SRCCOPY);
+        RECT canvasBg = {0, state->imageY, state->winW, state->winH};
+        DrawGlassPanel(dc, canvasBg, 0.0f, true, false);
+    }
+
     BitBlt(dc, state->imageX, state->imageY, state->w, visibleH, source, 0, state->scrollY, SRCCOPY);
     SelectObject(source, old);
     DeleteDC(source);
 
-    RECT imageBorder = {state->imageX, state->imageY, state->imageX + state->w, state->imageY + state->viewH};
-    HPEN border = CreatePen(PS_SOLID, 1, RGB(38, 44, 58));
-    HGDIOBJ oldPen = SelectObject(dc, border);
-    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-    Rectangle(dc, imageBorder.left, imageBorder.top, imageBorder.right, imageBorder.bottom);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(border);
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        Pen glassFrame(Color(85, 255, 255, 255), 1.0f);
+        graphics.DrawRectangle(&glassFrame, state->imageX, state->imageY, state->w - 1, state->viewH - 1);
+    }
 
     int savedClip = SaveDC(dc);
     IntersectClipRect(dc, state->imageX, state->imageY, state->imageX + state->w, state->imageY + state->viewH);
@@ -222,22 +207,37 @@ static void DrawEditor(EditorState *state, HWND hwnd, HDC dc) {
     if (state->h > state->viewH && StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        int trackX = state->imageX + state->w - 8;
+        int trackX = state->imageX + state->w - 10;
         int trackTop = state->imageY + 8;
         int trackH = std::max(24, state->viewH - 16);
-        float thumbH = std::max(24.0f, static_cast<float>(trackH) * static_cast<float>(state->viewH) / static_cast<float>(state->h));
+        float thumbH = std::max(28.0f, static_cast<float>(trackH) * static_cast<float>(state->viewH) / static_cast<float>(state->h));
         float maxThumbTravel = static_cast<float>(trackH) - thumbH;
         float thumbY = static_cast<float>(trackTop);
         if (state->h > state->viewH) {
             thumbY += maxThumbTravel * static_cast<float>(state->scrollY) / static_cast<float>(state->h - state->viewH);
         }
-        SolidBrush track(Color(60, 13, 15, 20));
-        SolidBrush thumb(Color(220, 99, 102, 241));
-        graphics.FillRectangle(&track, static_cast<float>(trackX), static_cast<float>(trackTop), 4.0f, static_cast<float>(trackH));
-        graphics.FillRectangle(&thumb, static_cast<float>(trackX - 1), thumbY, 6.0f, thumbH);
+        GraphicsPath trackPath, thumbPath;
+        BuildRoundedRectPath(&trackPath, static_cast<float>(trackX), static_cast<float>(trackTop), 6.0f, static_cast<float>(trackH), 3.0f);
+        BuildRoundedRectPath(&thumbPath, static_cast<float>(trackX), thumbY, 6.0f, thumbH, 3.0f);
+        SolidBrush track(Color(95, 15, 18, 28));
+        SolidBrush thumb(Color(210, 255, 255, 255));
+        Pen thumbBorder(Color(120, 86, 148, 255), 1.0f);
+        graphics.FillPath(&track, &trackPath);
+        graphics.FillPath(&thumb, &thumbPath);
+        graphics.DrawPath(&thumbBorder, &thumbPath);
     }
 
     DrawToolbar(state, dc);
+
+    // Outer glass window rim
+    if (StartGdiplus()) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        GraphicsPath winPath;
+        BuildRoundedRectPath(&winPath, 0.5f, 0.5f, static_cast<float>(state->winW - 1), static_cast<float>(state->winH - 1), 12.0f);
+        Pen winRim(Color(110, 255, 255, 255), 1.0f);
+        graphics.DrawPath(&winRim, &winPath);
+    }
     (void)hwnd;
 }
 
@@ -339,6 +339,7 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_CREATE: {
         CREATESTRUCTW *create = reinterpret_cast<CREATESTRUCTW *>(lParam);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        ApplyWindowGlassStyle(hwnd, 12, 248);
         SetFocus(hwnd);
         return 0;
     }

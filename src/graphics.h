@@ -21,6 +21,13 @@ void FillRectColor(HDC dc, const RECT &rect, COLORREF color);
 void DrawTextLabel(HDC dc, const std::wstring &text, int x, int y, COLORREF color);
 void DrawCenteredText(HDC dc, const wchar_t *text, const RECT &rect, int fontHeight, int weight, COLORREF color);
 
+// Apple macOS Frosted Glass (Vibrancy / Glassmorphism) primitives
+void ApplyWindowGlassStyle(HWND hwnd, int cornerRadius, BYTE alpha = 244);
+void BlurDcRegion(HDC dc, const RECT &rect, int blurRadius = 12);
+void DrawGlassPanel(HDC dc, const RECT &rect, float radius, bool blurBackdrop = true, bool highlight = false);
+void DrawGlassButton(HDC dc, const RECT &rect, float radius, bool primary, bool active,
+                     bool hovered, bool pressed = false, bool blurBackdrop = false);
+
 void DrawToolbarIcon(HDC dc, Action action, const RECT &button, bool active);
 void ApplyMosaic(HDC dc, RECT rect);
 void DrawArrow(HDC dc, POINT a, POINT b, COLORREF color);

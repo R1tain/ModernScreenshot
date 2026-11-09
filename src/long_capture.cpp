@@ -855,82 +855,67 @@ static void DrawLongPreview(LongSessionState *state, HDC dc, const RECT &preview
     if (StartGdiplus()) {
         Graphics graphics(dc);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        Pen border(Color(180, 40, 46, 60), 1.0f);
+        Pen border(Color(95, 255, 255, 255), 1.0f);
         graphics.DrawRectangle(&border, preview.left, preview.top, RectWidth(preview) - 1, RectHeight(preview) - 1);
-        SolidBrush fade(Color(220, 13, 15, 20));
-        graphics.FillRectangle(&fade, preview.left + 1, preview.top + 1, RectWidth(preview) - 2, 26);
     }
+
+    RECT badgeRect = {preview.left + 8, preview.top + 8, preview.left + 216, preview.top + 32};
+    DrawGlassPanel(dc, badgeRect, 12.0f, true, false);
 
     wchar_t label[96];
     wsprintfW(label, L"Live preview  •  %d × %d", state->w, state->totalH);
-    DrawTextLabel(dc, label, preview.left + 12, preview.top + 7, RGB(248, 250, 252));
+    DrawTextLabel(dc, label, preview.left + 18, preview.top + 12, RGB(248, 250, 252));
 }
 
 static void DrawLongSession(HWND hwnd, LongSessionState *state, HDC dc) {
     RECT rect;
     GetClientRect(hwnd, &rect);
-    FillRectColor(dc, rect, RGB(13, 15, 18));
+    FillRectColor(dc, rect, RGB(14, 18, 26));
 
-    if (StartGdiplus()) {
-        Graphics graphics(dc);
-        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        SolidBrush panel(Color(250, 13, 15, 18));
-        graphics.FillRectangle(&panel, 0, 0, RectWidth(rect), RectHeight(rect));
-        Pen border(Color(220, 99, 102, 241), 1.2f);
-        graphics.DrawRectangle(&border, 0, 0, RectWidth(rect) - 1, RectHeight(rect) - 1);
+    // Ambient content refraction behind the frosted glass panel
+    if (state && !state->frames.empty() && state->frames.back().bitmap && state->frames.back().copyH > 0) {
+        HDC src = CreateCompatibleDC(dc);
+        HGDIOBJ old = SelectObject(src, state->frames.back().bitmap);
+        SetStretchBltMode(dc, HALFTONE);
+        StretchBlt(dc, 0, 0, RectWidth(rect), RectHeight(rect),
+                   src, 0, 0, state->w, state->frames.back().copyH, SRCCOPY);
+        SelectObject(src, old);
+        DeleteDC(src);
     }
+
+    DrawGlassPanel(dc, rect, 14.0f, true, false);
 
     wchar_t status[128];
     wsprintfW(status, L"Long capture  •  %d frames  •  %d px", static_cast<int>(state->frames.size()), state->totalH);
-    DrawTextLabel(dc, status, 14, 12, RGB(248, 250, 252));
+    DrawTextLabel(dc, status, 16, 12, RGB(255, 255, 255));
 
     if (!state->started) {
-        DrawTextLabel(dc, L"Preparing automatic scroll capture...", 14, 34, RGB(148, 163, 184));
+        DrawTextLabel(dc, L"Preparing automatic scroll capture...", 16, 34, RGB(203, 213, 225));
     } else if (state->captureLimitReached) {
-        DrawTextLabel(dc, L"Finished or limit reached. Opening editor.", 14, 34, RGB(245, 158, 11));
+        DrawTextLabel(dc, L"Finished or limit reached. Opening editor.", 16, 34, RGB(251, 191, 36));
     } else if (state->pausedByHover) {
-        DrawTextLabel(dc, L"Paused  •  Click Stop (Enter) or Cancel (Esc)", 14, 34, RGB(56, 189, 248));
+        DrawTextLabel(dc, L"Paused  •  Click Stop (Enter) or Cancel (Esc)", 16, 34, RGB(125, 211, 252));
     } else if (state->skippedFrames > 0) {
-        DrawTextLabel(dc, L"Aligning seam overlap...", 14, 34, RGB(245, 158, 11));
+        DrawTextLabel(dc, L"Aligning seam overlap...", 16, 34, RGB(251, 191, 36));
     } else if (!state->statusText.empty()) {
-        DrawTextLabel(dc, state->statusText, 14, 34, RGB(148, 163, 184));
+        DrawTextLabel(dc, state->statusText, 16, 34, RGB(203, 213, 225));
     } else {
         wchar_t hint[128];
         wsprintfW(hint, L"Auto scrolling  •  +%d px", state->lastCopyH);
-        DrawTextLabel(dc, hint, 14, 34, RGB(148, 163, 184));
+        DrawTextLabel(dc, hint, 16, 34, RGB(203, 213, 225));
     }
 
     RECT preview = {14, 62, 346, 458};
     DrawLongPreview(state, dc, preview);
 
-    DrawTextLabel(dc, L"Enter: Finish   Esc: Cancel", 14, 478, RGB(100, 116, 139));
+    DrawTextLabel(dc, L"Enter: Finish   Esc: Cancel", 16, 478, RGB(180, 194, 212));
 
     RECT done = LongDoneRect();
     RECT cancel = LongCancelRect();
-    if (StartGdiplus()) {
-        Graphics graphics(dc);
-        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        GraphicsPath donePath;
-        BuildRoundedRectPath(&donePath, static_cast<float>(done.left), static_cast<float>(done.top),
-                             static_cast<float>(RectWidth(done)), static_cast<float>(RectHeight(done)), 8.0f);
-        Color doneColor = (state->hoveredButton == 1) ? Color(255, 129, 140, 248) : Color(255, 99, 102, 241);
-        SolidBrush doneFill(doneColor);
-        graphics.FillPath(&doneFill, &donePath);
-
-        GraphicsPath cancelPath;
-        BuildRoundedRectPath(&cancelPath, static_cast<float>(cancel.left), static_cast<float>(cancel.top),
-                             static_cast<float>(RectWidth(cancel)), static_cast<float>(RectHeight(cancel)), 8.0f);
-        Color cancelColor = (state->hoveredButton == 2) ? Color(255, 45, 53, 72) : Color(255, 30, 35, 48);
-        SolidBrush cancelFill(cancelColor);
-        Pen cancelBorder(Color(180, 56, 64, 82), 1.0f);
-        graphics.FillPath(&cancelFill, &cancelPath);
-        graphics.DrawPath(&cancelBorder, &cancelPath);
-    } else {
-        FillRectColor(dc, done, RGB(99, 102, 241));
-        FillRectColor(dc, cancel, RGB(30, 35, 48));
-    }
+    DrawGlassButton(dc, done, 9.0f, true, false, state->hoveredButton == 1, false, false);
+    DrawGlassButton(dc, cancel, 9.0f, false, false, state->hoveredButton == 2, false, false);
     DrawCenteredText(dc, L"Stop", done, -14, FW_SEMIBOLD, RGB(255, 255, 255));
-    DrawCenteredText(dc, L"Cancel", cancel, -14, FW_SEMIBOLD, RGB(226, 232, 240));
+    DrawCenteredText(dc, L"Cancel", cancel, -14, FW_SEMIBOLD, RGB(241, 245, 249));
 }
 
 static void PaintLongSessionBuffered(HWND hwnd, LongSessionState *state, HDC dc, const RECT &paint) {
@@ -966,6 +951,7 @@ LRESULT CALLBACK LongSessionProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         state = reinterpret_cast<LongSessionState *>(create->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
         ExcludeWindowFromCapture(hwnd);
+        ApplyWindowGlassStyle(hwnd, 14, 242);
         return 0;
     }
     case WM_ERASEBKGND:
