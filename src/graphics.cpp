@@ -378,34 +378,34 @@ void DrawGlassPanel(HDC dc, const RECT &rect, float radius, bool blurBackdrop, b
         graphics.SetClip(&oldClip);
     }
 
-    // Apple macOS Dark Frosted Vibrancy Tint (translucent slate-indigo + milky frost sheen)
+    // Apple macOS Dark Smoked-Glass Vibrancy Tint (high contrast even over white backgrounds)
     Gdiplus::LinearGradientBrush glassFill(
         PointF(fx, fy), PointF(fx, fy + fh),
-        highlight ? Color(160, 44, 52, 78) : Color(152, 28, 33, 46),
-        highlight ? Color(175, 28, 34, 54) : Color(172, 16, 20, 30));
+        highlight ? Color(210, 26, 34, 54) : Color(202, 15, 20, 32),
+        highlight ? Color(225, 18, 24, 40) : Color(218, 10, 14, 22));
     graphics.FillPath(&glassFill, &clipPath);
 
-    // Upper frosted specular sheen (simulates sky light reflection on frosted glass)
+    // Subtle upper specular glass sheen
     GraphicsPath sheenPath;
-    BuildRoundedRectPath(&sheenPath, fx + 1.0f, fy + 1.0f, fw - 2.0f, std::max(4.0f, fh * 0.48f),
+    BuildRoundedRectPath(&sheenPath, fx + 1.0f, fy + 1.0f, fw - 2.0f, std::max(4.0f, fh * 0.42f),
                          std::max(1.0f, radius - 1.0f));
     Gdiplus::LinearGradientBrush sheenBrush(
-        PointF(fx, fy), PointF(fx, fy + std::max(4.0f, fh * 0.50f)),
-        Color(highlight ? 44 : 28, 255, 255, 255),
+        PointF(fx, fy), PointF(fx, fy + std::max(4.0f, fh * 0.45f)),
+        Color(highlight ? 32 : 20, 255, 255, 255),
         Color(0, 255, 255, 255));
     graphics.FillPath(&sheenBrush, &sheenPath);
 
-    // 1px Specular Glass Rim (bright top edge fading to soft bottom edge)
+    // Dual-layer Apple Glass Border (outer luminous accent + inner specular rim)
     if (radius > 0.5f) {
         Gdiplus::LinearGradientBrush borderGrad(
             PointF(fx, fy), PointF(fx, fy + fh),
-            highlight ? Color(180, 145, 165, 255) : Color(125, 255, 255, 255),
-            highlight ? Color(95, 99, 102, 241) : Color(38, 255, 255, 255));
-        Pen borderPen(&borderGrad, 1.1f);
+            highlight ? Color(230, 96, 165, 250) : Color(150, 148, 163, 184),
+            highlight ? Color(165, 59, 130, 246) : Color(75, 100, 116, 139));
+        Pen borderPen(&borderGrad, highlight ? 1.4f : 1.1f);
         graphics.DrawPath(&borderPen, &clipPath);
     } else {
-        Pen topLine(Color(95, 255, 255, 255), 1.0f);
-        Pen botLine(Color(55, 255, 255, 255), 1.0f);
+        Pen topLine(Color(95, 148, 163, 184), 1.0f);
+        Pen botLine(Color(110, 56, 70, 98), 1.0f);
         graphics.DrawLine(&topLine, fx, fy, fx + fw, fy);
         graphics.DrawLine(&botLine, fx, fy + fh - 1.0f, fx + fw, fy + fh - 1.0f);
     }
@@ -418,7 +418,7 @@ void DrawGlassButton(HDC dc, const RECT &rect, float radius, bool primary, bool 
     if (w <= 0 || h <= 0) return;
 
     if (!StartGdiplus()) {
-        FillRectColor(dc, rect, (primary || active) ? RGB(56, 116, 246) : RGB(32, 38, 52));
+        FillRectColor(dc, rect, (primary || active) ? RGB(24, 118, 252) : RGB(20, 26, 38));
         return;
     }
 
@@ -444,65 +444,52 @@ void DrawGlassButton(HDC dc, const RECT &rect, float radius, bool primary, bool 
     }
 
     Color topColor, botColor, rimTop, rimBot;
-    int sheenAlpha = 36;
+    int sheenAlpha = 28;
 
-    if (primary) {
-        // Apple System Blue / Indigo Translucent Glass Pill
+    if (primary || active) {
+        // Vibrant Apple Electric Blue Glass (unmistakably distinct from unselected buttons)
         if (pressed) {
-            topColor = Color(210, 46, 98, 226);
-            botColor = Color(220, 34, 76, 198);
-            sheenAlpha = 22;
+            topColor = Color(245, 16, 92, 216);
+            botColor = Color(250, 12, 72, 188);
+            sheenAlpha = 18;
         } else if (hovered) {
-            topColor = Color(215, 86, 148, 255);
-            botColor = Color(205, 58, 108, 246);
-            sheenAlpha = 64;
-        } else {
-            topColor = Color(198, 66, 130, 252);
-            botColor = Color(190, 48, 96, 236);
+            topColor = Color(248, 42, 138, 255);
+            botColor = Color(248, 20, 102, 236);
             sheenAlpha = 48;
-        }
-        rimTop = Color(195, 200, 228, 255);
-        rimBot = Color(95, 92, 148, 255);
-    } else if (active) {
-        // Active Tool / Mode Pill in Frosted Luminous Glass
-        if (hovered) {
-            topColor = Color(175, 88, 128, 248);
-            botColor = Color(155, 62, 92, 218);
-            sheenAlpha = 58;
         } else {
-            topColor = Color(155, 76, 114, 238);
-            botColor = Color(135, 52, 82, 204);
-            sheenAlpha = 46;
+            topColor = Color(242, 24, 118, 252);
+            botColor = Color(246, 14, 88, 224);
+            sheenAlpha = 36;
         }
-        rimTop = Color(185, 185, 215, 255);
-        rimBot = Color(90, 105, 175, 255);
+        rimTop = Color(245, 147, 210, 255);
+        rimBot = Color(180, 56, 138, 248);
     } else {
-        // Neutral Apple Frosted Glass Capsule
+        // Dark Smoked-Obsidian Frosted Glass (never washes out to white)
         if (pressed) {
-            topColor = Color(85, 255, 255, 255);
-            botColor = Color(48, 255, 255, 255);
-            sheenAlpha = 20;
-            rimTop = Color(135, 255, 255, 255);
-            rimBot = Color(55, 255, 255, 255);
+            topColor = Color(230, 34, 46, 72);
+            botColor = Color(238, 24, 34, 54);
+            sheenAlpha = 16;
+            rimTop = Color(190, 96, 165, 250);
+            rimBot = Color(120, 59, 130, 246);
         } else if (hovered) {
-            topColor = Color(68, 255, 255, 255);
-            botColor = Color(32, 255, 255, 255);
-            sheenAlpha = 45;
-            rimTop = Color(150, 255, 255, 255);
-            rimBot = Color(60, 255, 255, 255);
+            topColor = Color(222, 38, 52, 82);
+            botColor = Color(232, 26, 36, 58);
+            sheenAlpha = 30;
+            rimTop = Color(215, 125, 211, 252);
+            rimBot = Color(135, 59, 130, 246);
         } else {
-            topColor = Color(36, 255, 255, 255);
-            botColor = Color(15, 255, 255, 255);
-            sheenAlpha = 26;
-            rimTop = Color(96, 255, 255, 255);
-            rimBot = Color(32, 255, 255, 255);
+            topColor = Color(205, 20, 26, 40);
+            botColor = Color(220, 13, 17, 28);
+            sheenAlpha = 16;
+            rimTop = Color(105, 148, 163, 184);
+            rimBot = Color(55, 71, 85, 105);
         }
     }
 
     // Drop shadow under button
     GraphicsPath shadowPath;
     BuildRoundedRectPath(&shadowPath, fx, fy + 1.0f, fw, fh, radius);
-    Pen shadowPen(Color(55, 0, 0, 0), 1.2f);
+    Pen shadowPen(Color(80, 0, 0, 0), 1.2f);
     graphics.DrawPath(&shadowPen, &shadowPath);
 
     // Main frosted glass gradient fill
@@ -512,22 +499,43 @@ void DrawGlassButton(HDC dc, const RECT &rect, float radius, bool primary, bool 
     // Top specular glass highlight
     if (fh >= 12.0f) {
         GraphicsPath highlightPath;
-        BuildRoundedRectPath(&highlightPath, fx + 1.0f, fy + 1.0f, fw - 2.0f, fh * 0.48f,
+        BuildRoundedRectPath(&highlightPath, fx + 1.0f, fy + 1.0f, fw - 2.0f, fh * 0.42f,
                              std::max(1.0f, radius - 1.0f));
         Gdiplus::LinearGradientBrush sheenGrad(
-            PointF(fx, fy), PointF(fx, fy + fh * 0.5f),
+            PointF(fx, fy), PointF(fx, fy + fh * 0.45f),
             Color(sheenAlpha, 255, 255, 255), Color(0, 255, 255, 255));
         graphics.FillPath(&sheenGrad, &highlightPath);
     }
 
     // Specular 1px glass rim
     Gdiplus::LinearGradientBrush rimGrad(PointF(fx, fy), PointF(fx, fy + fh), rimTop, rimBot);
-    Pen rimPen(&rimGrad, (primary || active) ? 1.2f : 1.0f);
+    Pen rimPen(&rimGrad, (primary || active || hovered) ? 1.3f : 1.0f);
     graphics.DrawPath(&rimPen, &path);
+
+    // Glowing bottom indicator pill on active tool/mode buttons
+    if (active && fw >= 36.0f && fh >= 28.0f) {
+        float indW = std::min(22.0f, fw * 0.36f);
+        float indX = fx + (fw - indW) * 0.5f;
+        float indY = fy + fh - 3.2f;
+        SolidBrush indBrush(Color(245, 186, 230, 255));
+        graphics.FillRectangle(&indBrush, indX, indY, indW, 2.0f);
+    }
 }
 
 void DrawToolbarIcon(HDC dc, Action action, const RECT &button, bool active) {
-    COLORREF color = active ? RGB(255, 255, 255) : RGB(236, 242, 250);
+    COLORREF color = RGB(255, 255, 255);
+    if (!active) {
+        switch (action) {
+        case ActionToolBlur:  color = RGB(251, 191, 36); break;  // Amber Gold
+        case ActionToolArrow: color = RGB(251, 146, 60); break;  // Vibrant Orange
+        case ActionToolRect:  color = RGB(248, 113, 113); break; // Coral Rose
+        case ActionToolText:  color = RGB(56, 189, 248); break;  // Sky Cyan
+        case ActionUndo:      color = RGB(203, 213, 225); break; // Cool Silver
+        case ActionCopy:      color = RGB(52, 211, 153); break;  // Emerald Green
+        case ActionSave:      color = RGB(96, 165, 250); break;  // Electric Blue
+        default:              color = RGB(226, 232, 240); break;
+        }
+    }
     float x = static_cast<float>(button.left);
     float y = static_cast<float>(button.top);
     float w = static_cast<float>(RectWidth(button));

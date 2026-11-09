@@ -84,9 +84,9 @@ static constexpr int kSettingsCancel = 3002;
 static constexpr int kSettingsHotkeyCapture = 3003;
 static constexpr int kSettingsStartup = 3009;
 
-static constexpr int kOverlayModeW = 116;
-static constexpr int kOverlayModeH = 34;
-static constexpr int kOverlayModeGap = 8;
+static constexpr int kOverlayModeW = 132;
+static constexpr int kOverlayModeH = 38;
+static constexpr int kOverlayModeGap = 10;
 static constexpr int kLongSessionDone = 4101;
 static constexpr int kLongSessionCancel = 4102;
 
